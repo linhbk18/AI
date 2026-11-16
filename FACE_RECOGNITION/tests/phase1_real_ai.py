@@ -33,7 +33,7 @@ def run():
     temp=tempfile.TemporaryDirectory(prefix='phase1-real-ai-',dir=ROOT/'.venv')
     try:
         db=Path(temp.name)/'test.sqlite3'
-        app=create_app(engine,overrides={'TESTING':True,'DATABASE_PATH':db})
+        app=create_app(engine,overrides={'TESTING':True,'DATABASE_PATH':db,'LEGACY_PHOTO_UPLOAD_ENABLED':True})
         deadline=time.monotonic()+180
         while engine.state not in ('ready','error') and time.monotonic()<deadline:time.sleep(1)
         assert engine.state=='ready',engine.state

@@ -16,5 +16,8 @@ class Config:
     TRUSTED_HOSTS = ['localhost', '127.0.0.1', '[::1]']
     TESTING = False
     AUTO_ATTENDANCE_ENABLED = False
+    # Photo upload/manual capture enrollment is retired in favour of live camera
+    # enrollment (backend/enrollment_routes.py). Kept only for legacy QA scripts.
+    LEGACY_PHOTO_UPLOAD_ENABLED = False
     AUTO_ATTENDANCE_EVIDENCE = ROOT / 'outputs' / 'automatic_attendance_evaluation.json'
     AUTO_ATTENDANCE_ACTIVATION = ROOT / 'outputs' / 'automation_activation.json'

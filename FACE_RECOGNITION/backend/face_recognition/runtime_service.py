@@ -124,12 +124,77 @@ class RecognitionEngine:
                 timings_ms=dict(detection_ms=elapsed))
         finally:self._preview_guard.release()
 
-    def refresh_gallery(self):
-        if self.state!='ready' or not self._guard.acquire(blocking=False):
+    def refresh_gallery(self,wait=0):
+        """Reload the SQLite gallery into the matcher. wait>0 blocks up to wait seconds.
+
+        Returns True only when the matcher now serves the store's current revision.
+        """
+        if self.state!='ready':
+            return False
+        if not (self._guard.acquire(timeout=wait) if wait>0 else self._guard.acquire(blocking=False)):
             return False
         try:
             self._refresh_gallery_locked()
-            return True
+            return self.management_store is None or self._gallery_revision==self.management_store.gallery_revision()
+        finally:
+            self._guard.release()
+
+    def validate_gallery(self,records):
+        """Raise if a would-be gallery cannot be served (checked before SQLite COMMIT)."""
+        FaceMatcher(records,self._gallery_config,'pre-commit-validation',None)
+
+    def loaded_gallery_revision(self):
+        with self._state_guard:
+            return self._gallery_revision
+
+    def gallery_records(self):
+        """Current in-memory gallery (labels + vectors) for enrollment identity checks."""
+        with self._state_guard:
+            return list(self.matcher.records) if self.matcher is not None else []
+
+    def enrollment_detect(self,bgr,score_threshold=.6):
+        """YuNet boxes + 5 landmarks; separate lock from ArcFace so feedback stays live."""
+        if self.state!='ready': raise EngineUnavailable()
+        return self.pipeline.yunet.detect_landmarks(bgr,dimension=640,score_threshold=score_threshold)
+
+    def enrollment_embedding(self,bgr,box,collection,cancelled=lambda:False):
+        """Gallery-compatible ArcFace vector for the single face inside box.
+
+        Runs the unchanged retinaface_reuse code path (RetinaFace detection,
+        DeepFace eye alignment, ArcFace forward, normalization=base) on a
+        face-centred crop instead of the whole frame: same model and alignment,
+        far fewer detector pixels. The crop lives only in RAM.
+        """
+        import cv2
+        if self.state!='ready': raise EngineUnavailable()
+        if not self._guard.acquire(timeout=collection['embedding_lock_wait_s']): raise EngineBusy()
+        try:
+            start=time.perf_counter()
+            height,width=bgr.shape[:2]
+            m=collection['crop_margin_ratio']
+            cx,cy=box['x']+box['w']/2,box['y']+box['h']/2
+            half=max(box['w'],box['h'])*(0.5+m)
+            x0,y0,x1,y1=int(cx-half),int(cy-half),int(cx+half),int(cy+half)
+            crop=cv2.copyMakeBorder(bgr[max(0,y0):min(height,y1),max(0,x0):min(width,x1)],
+                max(0,-y0),max(0,y1-height),max(0,-x0),max(0,x1-width),cv2.BORDER_CONSTANT,value=[0,0,0])
+            limit=collection.get('crop_max_dimension')
+            if limit and max(crop.shape[:2])>limit:
+                s=limit/max(crop.shape[:2])
+                crop=cv2.resize(crop,(round(crop.shape[1]*s),round(crop.shape[0]*s)),interpolation=cv2.INTER_AREA)
+            try:
+                faces,timings=self.pipeline.run(crop,'retinaface_reuse',cancelled)
+            except InterruptedError:
+                raise SessionStopped()
+            if len(faces)!=1:
+                raise ValueError('NO_FACE' if not faces else 'MULTIPLE_FACES')
+            vector=np.asarray(faces[0]['embedding'],dtype=float)
+            if vector.shape!=(512,) or not np.isfinite(vector).all() or np.linalg.norm(vector)==0:
+                raise ValueError('INVALID_EMBEDDING')
+            with self._state_guard:
+                self.inference_count+=1
+            timings['total_ms']=(time.perf_counter()-start)*1000
+            timings['crop_size']=list(crop.shape[:2])
+            return vector/np.linalg.norm(vector),timings
         finally:
             self._guard.release()
 

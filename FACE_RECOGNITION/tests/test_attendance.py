@@ -44,6 +44,19 @@ class AttendanceAPI(unittest.TestCase):
         self.assertFalse(self.confirm(sid,self.s[0]['id']).json['changed'])
         with self.store.connection() as db:self.assertEqual(db.execute('SELECT count(*) FROM attendance_records WHERE session_id=?',(sid,)).fetchone()[0],2)
 
+    def test_manual_confirmation_does_not_require_ai_verification_or_policy(self):
+        # Human confirmation remains available even when biometric automation is locked.
+        sid=self.begin().json['id']
+        self.assertFalse(self.client.get('/api/attendance/automation-status').json['ready'])
+        result=self.confirm(sid,self.s[0]['id'])
+        self.assertEqual(result.status_code,200)
+        self.assertEqual(result.json['session']['stats']['present'],1)
+        self.assertEqual(result.json['session']['stats']['total'],2)
+        record=next(r for r in result.json['session']['records'] if r['student_id']==self.s[0]['id'])
+        self.assertEqual(record['source'],'manual')
+        self.assertEqual(record['recognition_source'],'MANUAL')
+        self.assertFalse(self.confirm(sid,self.s[0]['id']).json['changed'])
+
     def test_finish_absence_and_no_further_camera_writes(self):
         sid=self.begin().json['id'];self.confirm(sid,self.s[0]['id'])
         r=self.post(f'/api/attendance/sessions/{sid}/finish').json

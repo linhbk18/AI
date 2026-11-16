@@ -255,6 +255,12 @@
     try{
       const response=await fetch("/api/health?profile="+encodeURIComponent(profile.value),{cache:"no-store",signal:AbortSignal.timeout(5000)});if(!response.ok)throw new Error();
       const data=await response.json();if(data.application!=="face_recognition_camera_v1")throw new Error();
+      if(data.code_reload_required){
+        ready=false;pill('backend-state','Cần khởi động lại Flask','error');$('start-camera').disabled=true;
+        if(running)await stop('Mã nguồn đã thay đổi hoặc đổi nhánh Git. Khởi động lại Flask để tránh dùng lẫn hai phiên bản.','error');
+        else message('Mã nguồn đã thay đổi hoặc đổi nhánh Git. Cần khởi động lại Flask.','error');
+        return;
+      }
       if(data.automatic_attendance)showAutomationStatus(data.automatic_attendance);
       ready=data.ready===true;pill("backend-state",ready?"Backend sẵn sàng":data.state==="error"?"Lỗi mô hình":"Đang tải mô hình",ready?"ready":data.state==="error"?"error":"busy");
       text("gallery-vectors",String(data.registered_embeddings??"—"));text("gallery-students",String(data.registered_students??"—"));

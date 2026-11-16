@@ -36,7 +36,7 @@ class ManagementAPI(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.db=Path(self.temp.name)/'management.sqlite3'
         self.engine=EnrollmentFake()
-        self.app=create_app(self.engine,start_models=False,overrides={'TESTING':True,'DATABASE_PATH':self.db})
+        self.app=create_app(self.engine,start_models=False,overrides={'TESTING':True,'DATABASE_PATH':self.db,'LEGACY_PHOTO_UPLOAD_ENABLED':True,'ENROLLMENT_BACKUP_DIR':Path(self.temp.name)/'backups'})
         self.client=self.app.test_client()
         html=self.client.get('/overview').get_data(as_text=True)
         token=json.loads(re.search(r'<script id="management-config" type="application/json">(.*?)</script>',html).group(1))['csrfToken']

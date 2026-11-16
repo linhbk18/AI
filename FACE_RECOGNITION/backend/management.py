@@ -35,6 +35,8 @@ def management_blueprint(store,engine,token):
     @bp.get('/classes/<int:identity>')
     @bp.get('/students')
     @bp.get('/students/<int:identity>')
+    @bp.get('/students/new')
+    @bp.get('/students/<int:identity>/face')
     def page(identity=None):
         return render_template('management.html',csrf_token=token)
 

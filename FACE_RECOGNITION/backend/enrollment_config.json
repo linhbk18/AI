@@ -1,0 +1,136 @@
+{
+  "schema_version": 1,
+  "_note": "Ngưỡng khởi đầu cho đăng ký khuôn mặt bằng camera. Chỉnh tại đây, không cần sửa mã. Góc: yaw dương = sinh viên quay sang TRÁI của chính mình; pitch dương = ngẩng lên.",
+  "poses": [
+    {
+      "key": "front",
+      "label": "Nhìn thẳng",
+      "instruction": "Nhìn thẳng vào camera, giữ đầu thẳng.",
+      "samples": 4
+    },
+    {
+      "key": "left",
+      "label": "Quay trái",
+      "instruction": "Từ từ quay đầu sang bên TRÁI của bạn.",
+      "samples": 3
+    },
+    {
+      "key": "right",
+      "label": "Quay phải",
+      "instruction": "Từ từ quay đầu sang bên PHẢI của bạn.",
+      "samples": 3
+    },
+    {
+      "key": "up",
+      "label": "Ngẩng nhẹ",
+      "instruction": "Ngẩng mặt lên nhẹ, mắt vẫn hướng về camera.",
+      "samples": 3
+    },
+    {
+      "key": "down",
+      "label": "Cúi nhẹ",
+      "instruction": "Cúi mặt xuống nhẹ, mắt vẫn hướng về camera.",
+      "samples": 3
+    }
+  ],
+  "pose_ranges_deg": {
+    "front": {
+      "yaw": [
+        -12,
+        12
+      ],
+      "pitch": [
+        -12,
+        12
+      ]
+    },
+    "left": {
+      "yaw": [
+        20,
+        45
+      ],
+      "pitch": [
+        -20,
+        20
+      ]
+    },
+    "right": {
+      "yaw": [
+        -45,
+        -20
+      ],
+      "pitch": [
+        -20,
+        20
+      ]
+    },
+    "up": {
+      "yaw": [
+        -15,
+        15
+      ],
+      "pitch": [
+        12,
+        30
+      ]
+    },
+    "down": {
+      "yaw": [
+        -15,
+        15
+      ],
+      "pitch": [
+        -30,
+        -12
+      ]
+    }
+  },
+  "pose_model": {
+    "_note": "Hình học 5 điểm YuNet trên mô hình đầu 3D chung. yaw = atan((mũi lệch ngang / khoảng cách 2 mắt) / yaw_depth_ratio). pitch theo vị trí mũi giữa đường mắt và đường miệng. Mốc trung tính lấy từ các mẫu 'Nhìn thẳng' đã nhận của chính sinh viên.",
+    "yaw_depth_ratio": 0.41,
+    "neutral_nose_ratio": 0.53,
+    "eye_mouth_span": 320,
+    "nose_depth_eye": 135,
+    "nose_depth_mouth": 125,
+    "personal_baseline_limit_deg": 10
+  },
+  "quality": {
+    "detector_score_threshold": 0.6,
+    "min_detection_confidence": 0.6,
+    "min_face_width_ratio": 0.2,
+    "min_face_width_px": 120,
+    "max_face_width_ratio": 0.6,
+    "edge_margin_ratio": 0.02,
+    "min_laplacian_variance": 60,
+    "sharpness_face_width_px": 160,
+    "min_brightness": 70,
+    "max_brightness": 200,
+    "min_eye_distance_px": 30
+  },
+  "collection": {
+    "min_sample_interval_s": 0.4,
+    "duplicate_cosine": 0.97,
+    "near_duplicate_cosine": 0.93,
+    "near_duplicate_min_pose_delta_deg": 3.0,
+    "near_duplicate_min_interval_s": 1.5,
+    "pose_timeout_s": 90,
+    "embedding_lock_wait_s": 3.0,
+    "max_frame_dimension": 960,
+    "crop_margin_ratio": 0.6,
+    "crop_max_dimension": 0,
+    "_crop_note": "0 = không thu nhỏ vùng cắt. Thử trên ảnh thật: thu nhỏ còn 400/320 px làm cosine với embedding gốc giảm (tới ~0.87), nên giữ độ phân giải gốc.",
+    "box_match_min_iou": 0.3,
+    "_timing_note": "Đo thật trên máy này (outputs/face_enrollment/real_ai_check.json): ~10-12 s/mẫu (RetinaFace ~9.5 s, ArcFace ~0.5 s). Vì vậy 16 mẫu và timeout 90 s; tăng số mẫu khi chạy trên máy mạnh hơn."
+  },
+  "verification": {
+    "other_student_warning_cosine": 0.5,
+    "same_student_min_cosine": 0.35
+  },
+  "session": {
+    "ttl_s": 600,
+    "max_active_sessions": 2
+  },
+  "backups": {
+    "keep_last": 20
+  }
+}

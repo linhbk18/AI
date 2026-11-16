@@ -16,6 +16,7 @@ from werkzeug.exceptions import HTTPException
 from .config import Config, FRONTEND, ROOT
 from .database.db import ManagementStore
 from .management import management_blueprint
+from .enrollment_routes import enrollment_blueprint
 from .attendance.attendance_service import AttendanceService
 from .attendance.automatic import AutomaticAttendance
 from .attendance.continuity import Continuity
@@ -31,9 +32,19 @@ from .face_recognition.runtime_service import (
 from .face_recognition.camera_pipeline import PROFILES
 
 
+def source_fingerprint():
+    """Detect a checkout/reset while an old Flask process still holds imported code."""
+    try:
+        files=sorted((ROOT/'backend').rglob('*.py'))
+        values=[(p.relative_to(ROOT).as_posix(),hashlib.sha256(p.read_bytes()).hexdigest()) for p in files]
+        return hashlib.sha256(json.dumps(values,sort_keys=True).encode()).hexdigest()
+    except OSError:return 'source_unavailable'
+
+
 def create_app(engine=None, start_models=True, overrides=None):
     app = Flask(__name__, template_folder=str(FRONTEND / 'templates'),
                 static_folder=str(FRONTEND / 'static'), static_url_path='/static')
+    loaded_source_fingerprint=source_fingerprint()
     app.config.from_object(Config)
     if overrides:
         app.config.update(overrides)
@@ -52,6 +63,9 @@ def create_app(engine=None, start_models=True, overrides=None):
     if hasattr(service,'configure_store'):
         service.configure_store(store)
     app.register_blueprint(management_blueprint(store,service,token))
+    enrollment_bp=enrollment_blueprint(store,service,app.config.get('ENROLLMENT_CONFIG_PATH'),app.config.get('ENROLLMENT_BACKUP_DIR'))
+    app.register_blueprint(enrollment_bp);app.extensions['enrollment_sessions']=enrollment_bp.enrollment_sessions
+    app.extensions['enrollment_worker']=enrollment_bp.enrollment_worker
     def camera_config():
         return dict(csrfToken=token,maxFrameDimension=app.config['CLIENT_FRAME_DIMENSION'],frameIntervalMs=app.config['FRAME_INTERVAL_MS'],requestTimeoutMs=app.config['REQUEST_TIMEOUT_MS'],profiles=PROFILES)
     app.register_blueprint(attendance_blueprint(attendance,token,camera_config))
@@ -76,6 +90,12 @@ def create_app(engine=None, start_models=True, overrides=None):
             if request.path != '/api/extract_face' and not secrets.compare_digest(request.headers.get('X-Camera-Token', ''), token):
                 return error('TOKEN_REQUIRED', 'Phiên trang đã hết hạn. Hãy tải lại trang.', 403)
 
+    @app.url_defaults
+    def asset_version(endpoint,values):
+        if endpoint=='static' and values.get('filename','').endswith(('.js','.css')):
+            try:values.setdefault('v',str((FRONTEND/'static'/values['filename']).stat().st_mtime_ns))
+            except OSError:pass
+
     @app.after_request
     def response_headers(response):
         if request.path.startswith('/api/') or request.path == '/' or request.endpoint in ('management.page','attendance.page','attendance.camera'):
@@ -95,8 +115,13 @@ def create_app(engine=None, start_models=True, overrides=None):
     @app.get('/api/health')
     def health():
         status=automation_status()
+        model=service.health()
+        reload_required=source_fingerprint()!=loaded_source_fingerprint
+        if reload_required:model.update(ready=False,state='restart_required')
         return jsonify(application='face_recognition_camera_v1',automatic_attendance_requested=automatic.requested,
-                       automatic_attendance_reason=automatic.reason,automatic_attendance=status, **service.health())
+                       automatic_attendance_reason=automatic.reason,automatic_attendance=status,
+                       manual_attendance_enabled=True,code_reload_required=reload_required,
+                       loaded_source_fingerprint=loaded_source_fingerprint,**model)
 
     def automation_status(profile=None):
         matcher=getattr(service,'matcher',None)
@@ -115,6 +140,10 @@ def create_app(engine=None, start_models=True, overrides=None):
         if matcher is not None and getattr(matcher,'policy',None) is None:
             status['ready']=False;status['blocking_reasons'].append('policy_not_loaded_for_runtime_gallery')
             status['message']+=' Policy chưa nạp cho gallery runtime; đánh giá đúng signature và khởi động lại Flask sau publish.'
+        if source_fingerprint()!=loaded_source_fingerprint:
+            status['ready']=False;status['can_enable']=False
+            status['blocking_reasons'].append('source_reload_required')
+            status['message']='Mã nguồn đã thay đổi hoặc đổi nhánh Git. Khởi động lại Flask trước khi dùng camera.'
         return status
 
     @app.get('/api/attendance/automation-status')
