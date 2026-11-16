@@ -13,7 +13,7 @@ import numpy as np
 
 from .face_service import FaceMatcher
 from .camera_pipeline import CameraPipeline, YuNetDetector, PROFILES
-from .enrollment_quality import face_box_feedback,frame_quality_feedback,estimate_head_pose,posture_matches,classify_posture
+from .enrollment_quality import face_box_feedback,frame_quality_feedback,estimate_head_pose,posture_matches,classify_posture,pose_guidance_feedback
 
 ROOT = Path(__file__).resolve().parents[2]
 OUTPUTS = ROOT / 'outputs'
@@ -248,42 +248,53 @@ class RecognitionEngine:
         try:
             import cv2
             started=time.perf_counter()
+            max_dim=480
+            h,w=bgr.shape[:2]
+            if max(h,w)>max_dim:
+                scale=max_dim/max(h,w)
+                bgr=cv2.resize(bgr,(round(w*scale),round(h*scale)),interpolation=cv2.INTER_AREA)
             height,width=bgr.shape[:2]
             faces=self.pipeline.yunet.detect_faces(bgr,dimension=640,score_threshold=.6)
-            if not faces:return dict(success=False,face_found=False,message='Không tìm thấy mặt trong khung hình.',reason='Không tìm thấy mặt trong khung hình.')
-            if len(faces)!=1:return dict(success=False,face_found=True,face_count=len(faces),message='Đảm bảo chỉ có một khuôn mặt trong khung.',reason='Đảm bảo chỉ có một khuôn mặt trong khung.')
+            if not faces:
+                return dict(success=False,face_found=False,message='Không thấy rõ mặt. Vui lòng nhìn vào camera.',reason='Không thấy rõ mặt.')
+            if len(faces)!=1:
+                return dict(success=False,face_found=True,face_count=len(faces),message='Có nhiều khuôn mặt trong khung. Vui lòng chỉ để 1 người.',reason='Đảm bảo chỉ có một khuôn mặt trong khung.')
             face=faces[0];x,y,w,h=face.x,face.y,face.w,face.h
             box_feedback=face_box_feedback(width,height,x,y,w,h,face.confidence)
-            if box_feedback:return dict(success=False,face_found=True,face_count=1,message=box_feedback,reason=box_feedback)
+            if box_feedback:
+                return dict(success=False,face_found=True,face_count=1,message=box_feedback,reason=box_feedback)
             crop=bgr[max(0,y):min(height,y+h),max(0,x):min(width,x+w)]
-            if crop.size==0:return dict(success=False,face_found=True,face_count=1,message='Khuôn mặt nằm ngoài khung hình.',reason='Khuôn mặt nằm ngoài khung hình.')
+            if crop.size==0:
+                return dict(success=False,face_found=True,face_count=1,message='Khuôn mặt nằm ngoài khung hình.',reason='Khuôn mặt nằm ngoài khung hình.')
             gray=cv2.cvtColor(crop,cv2.COLOR_BGR2GRAY)
             sharpness=float(cv2.Laplacian(gray,cv2.CV_64F).var())
             brightness=float(gray.mean())
             quality_feedback=frame_quality_feedback(sharpness,brightness)
-            if quality_feedback:return dict(success=False,face_found=True,face_count=1,message=quality_feedback,reason=quality_feedback,sharpness=sharpness,brightness=brightness)
+            if quality_feedback:
+                return dict(success=False,face_found=True,face_count=1,message=quality_feedback,reason=quality_feedback,sharpness=sharpness,brightness=brightness)
             yaw,pitch=estimate_head_pose(face.left_eye,face.right_eye,face.nose_tip,face.left_mouth,face.right_mouth)
             posture=classify_posture(yaw,pitch)
-            try:
-                extracted=self.model.extract_faces(img_path=bgr,detector_backend=self.settings['detector_backend'],
-                    enforce_detection=True,align=self.settings['align'],expand_percentage=0,color_face='rgb',normalize_face=True,anti_spoofing=False)
-            except Exception as exc:
-                return dict(success=False,face_found=False,message='Không căn chỉnh được khuôn mặt. Hãy nhìn rõ vào camera.',reason=str(exc))
-            if len(extracted)!=1:return dict(success=False,face_found=True,face_count=len(extracted),message='AI chưa căn chỉnh được đúng một khuôn mặt.',reason='AI chưa căn chỉnh được đúng một khuôn mặt.')
-            from deepface.modules import preprocessing
-            image=extracted[0]['face'][:,:,::-1]
-            tensor=preprocessing.resize_image(image,target_size=(self.pipeline.model.input_shape[1],self.pipeline.model.input_shape[0]))
-            tensor=preprocessing.normalize_input(tensor,normalization=self.settings['normalization'])
-            embedding_started=time.perf_counter()
-            vector=np.asarray(self.pipeline.model.forward(tensor),dtype=np.float64).reshape(-1)
-            embedding_ms=(time.perf_counter()-embedding_started)*1000
+            if not posture:
+                hint=pose_guidance_feedback(yaw,pitch) or 'Góc mặt chưa đúng tư thế. Hãy điều chỉnh theo hướng dẫn.'
+                return dict(success=False,face_found=True,face_count=1,yaw=round(float(yaw),1),pitch=round(float(pitch),1),
+                    message=hint,reason=hint)
+
+            results,timings=self.pipeline.run(bgr,'retinaface_scaled_experimental')
+            if not results:
+                results,timings=self.pipeline.run(bgr,'yunet_recall_experimental')
+            if not results:
+                return dict(success=False,face_found=False,message='Không căn chỉnh được khuôn mặt. Hãy nhìn rõ vào camera.',reason='Không căn chỉnh được khuôn mặt.')
+            vector=np.asarray(results[0]['embedding'],dtype=np.float64).reshape(-1)
             norm=float(np.linalg.norm(vector))
-            if vector.shape!=(512,) or not np.isfinite(vector).all() or norm==0:raise ValueError('INVALID_EMBEDDING')
+            if vector.shape!=(512,) or not np.isfinite(vector).all() or norm==0:
+                raise ValueError('INVALID_EMBEDDING')
             vector=(vector/norm).tolist()
             posture_labels={'thẳng':'Nhìn thẳng','quay_trái':'Quay đầu sang trái','quay_phải':'Quay đầu sang phải','ngẩng_nhẹ':'Ngẩng nhẹ','cúi_nhẹ':'Cúi nhẹ'}
-            return dict(success=True,face_found=True,face_count=1,posture=posture,posture_label=posture_labels.get(posture),
-                message='Trích xuất khuôn mặt thành công.',yaw=round(float(yaw),2),pitch=round(float(pitch),2),sharpness=round(sharpness,1),brightness=round(brightness,1),
-                embedding=vector,embedding_ms=round(embedding_ms,2),processing_ms=round((time.perf_counter()-started)*1000,2))
+            posture_label=posture_labels.get(posture,posture)
+            msg=f'Đã nhận diện: {posture_label}'
+            return dict(success=True,face_found=True,face_count=1,posture=posture,posture_label=posture_label,
+                message=msg,yaw=round(float(yaw),1),pitch=round(float(pitch),1),sharpness=round(sharpness,1),brightness=round(brightness,1),
+                embedding=vector,embedding_ms=round(timings.get('embedding_ms',0.),2),processing_ms=round((time.perf_counter()-started)*1000,2))
         finally:self._guard.release()
 
     def start_loading(self):

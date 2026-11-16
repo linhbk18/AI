@@ -158,7 +158,7 @@ with app.test_client() as c:
             session=started.json['session']
             self.assertEqual(self.client.get('/api/overview').json['students'],0)
             frame=base64.b64encode(jpeg()).decode('ascii')
-            for _ in range(30):
+            for _ in range(15):
                 response=self.post('/api/enrollment/frame',dict(session=session,frame=frame))
                 self.assertEqual(response.status_code,200,response.json)
                 self.assertTrue(response.json['accepted'])
@@ -168,10 +168,10 @@ with app.test_client() as c:
             saved=self.post('/api/enrollment/finish',dict(session=session,student_code='SV-CAM',full_name='Camera student',class_id=c['id'],identity_confirmed=True,gallery_warning_acknowledged=True))
         self.assertEqual(saved.status_code,201,saved.json)
         self.assertTrue(saved.json['gallery_updated'])
-        self.assertEqual(saved.json['embedding_count'],30)
+        self.assertEqual(saved.json['embedding_count'],15)
         self.assertEqual(self.engine.refreshed,1)
         student=self.client.get(f"/api/students/{saved.json['student_id']}").json
-        self.assertEqual(student['face_count'],30)
+        self.assertEqual(student['face_count'],15)
         with sqlite3.connect(self.db) as db:
             self.assertEqual(db.execute('SELECT count(*) FROM face_embeddings WHERE image_sha256 IS NOT NULL').fetchone()[0],0)
 
@@ -179,7 +179,7 @@ with app.test_client() as c:
         c=self.classroom()
         with patch('backend.management.MIN_SAMPLE_INTERVAL_SECONDS',0):
             session=self.post('/api/enrollment/start',{}).json['session'];frame=base64.b64encode(jpeg()).decode('ascii')
-            for _ in range(30):self.assertEqual(self.post('/api/enrollment/frame',dict(session=session,frame=frame)).status_code,200)
+            for _ in range(15):self.assertEqual(self.post('/api/enrollment/frame',dict(session=session,frame=frame)).status_code,200)
             self.post('/api/enrollment/duplicate-check',dict(session=session))
             self.engine.refresh_result=False
             response=self.post('/api/enrollment/finish',dict(session=session,student_code='SV-ROLLBACK',full_name='No partial row',class_id=c['id'],identity_confirmed=True,gallery_warning_acknowledged=True))

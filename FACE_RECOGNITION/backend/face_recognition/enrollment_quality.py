@@ -59,3 +59,22 @@ def classify_posture(yaw, pitch):
     if -35 <= pitch <= -10 and abs(yaw) <= 25:
         return 'cúi_nhẹ'
     return None
+
+
+def pose_guidance_feedback(yaw, pitch):
+    if classify_posture(yaw, pitch):
+        return None
+    if abs(pitch) > 35:
+        return 'Góc ngẩng hoặc cúi quá lớn. Hãy nhìn về hướng camera.'
+    if abs(yaw) > 55:
+        return 'Góc quay đầu quá xa. Hãy quay mặt dần về phía trước.'
+    if 0 < yaw < 18:
+        return 'Quay đầu sang trái thêm một chút nữa.'
+    if -18 < yaw < 0:
+        return 'Quay đầu sang phải thêm một chút nữa.'
+    if 0 < pitch < 10:
+        return 'Ngẩng đầu lên thêm một chút nữa.'
+    if -10 < pitch < 0:
+        return 'Cúi đầu xuống thêm một chút nữa.'
+    return 'Hãy giữ yên đầu và điều chỉnh theo hướng dẫn.'
+

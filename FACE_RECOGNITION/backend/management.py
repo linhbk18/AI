@@ -14,7 +14,7 @@ from .face_recognition.enrollment_quality import (MIN_CONFIDENCE,MIN_FACE_FRACTI
 from .face_recognition.runtime_service import EngineBusy, EngineUnavailable
 
 ENROLLMENT_POSTURES=('thẳng','quay_trái','quay_phải','ngẩng_nhẹ','cúi_nhẹ')
-SAMPLES_PER_POSTURE=6
+SAMPLES_PER_POSTURE=3
 MIN_SAMPLE_INTERVAL_SECONDS=.4
 POSE_TIMEOUT_SECONDS=20
 SAME_POSE_COSINE_LIMIT=.97
@@ -264,6 +264,11 @@ def management_blueprint(store,engine,token):
                 return jsonify(success=False,face_found=False,message=f'Lỗi giải mã ảnh: {str(e)}',reason=f'Lỗi giải mã ảnh: {str(e)}'),200
             if frame is None or frame.size==0:
                 return jsonify(success=False,face_found=False,message='Không đọc được ảnh từ camera.',reason='Không đọc được ảnh từ camera.'),200
+            max_dim=480
+            h,w=frame.shape[:2]
+            if max(h,w)>max_dim:
+                scale=max_dim/max(h,w)
+                frame=cv2.resize(frame,(round(w*scale),round(h*scale)),interpolation=cv2.INTER_AREA)
             try:
                 if hasattr(engine,'extract_face_stateless'):
                     result=engine.extract_face_stateless(frame)
