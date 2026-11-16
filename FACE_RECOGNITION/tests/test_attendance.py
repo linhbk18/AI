@@ -127,6 +127,30 @@ class AttendanceAPI(unittest.TestCase):
 
 
 class ClassGallery(unittest.TestCase):
+    def test_demo_student_outside_class_is_removed_before_cosine(self):
+        import tempfile
+        from pathlib import Path
+        import numpy as np
+        from backend.database.db import ManagementStore
+        with tempfile.TemporaryDirectory(dir=ROOT/'.venv') as folder:
+            store=ManagementStore(Path(folder)/'scope-demo.sqlite3',ROOT/'outputs/face_embeddings.json')
+            config=json.loads((ROOT/'outputs/face_config.json').read_text(encoding='utf-8'))
+            imported=import_students(store,config)['students']
+            demo=next(row for row in imported if row['student_code']=='DEMO-SV005')
+            classmates=[row for row in imported if row['student_code'] in ('DEMO-SV001','DEMO-SV003')]
+            classroom=store.save('classes',dict(class_code='MIS-AI-QA',class_name='MIS-AI QA'))
+            for row in classmates:store.membership(classroom['id'],row['student_id'])
+            engine=RecognitionEngine();engine.configure_store(store);engine._gallery_config=config;engine._base_gallery_hash='test';engine._base_policy=None;engine.state='ready'
+            demo_query=next(record['embedding'] for record in store.legacy if record['student_id']=='Thu Thảo')
+            class Pipeline:
+                def run(self,*args):return [dict(embedding=demo_query,facial_area=dict(x=1,y=1,w=40,h=40))],{}
+            engine.pipeline=Pipeline()
+            face=engine.analyze(np.zeros((100,100,3),dtype=np.uint8),allowed_student_ids=[r['student_id'] for r in classmates],class_id=classroom['id'])['faces'][0]
+            scoped=engine._class_matchers[(engine._gallery_revision,classroom['id'],tuple(sorted(r['student_id'] for r in classmates)))]
+            self.assertTrue(scoped.records)
+            self.assertNotIn('DEMO-SV005 · Thu Thảo',{record['student_id'] for record in scoped.records})
+            self.assertTrue(face['unknown'],face);self.assertEqual(face['label'],'Không xác định');self.assertIsNone(face['top1']['student'])
+
     def test_scoped_one_identity_none_and_outside_class(self):
         import tempfile
         from pathlib import Path

@@ -53,6 +53,7 @@
       message("Đang phát hiện vị trí khuôn mặt. Danh tính sẽ được phân tích bằng RetinaFace + ArcFace.");
       animate();schedulePreview(epoch,0);scheduleIdentity(epoch,250);
     }catch(error){
+      console.error("Chi tiết lỗi:", error);
       if(epoch!==generation)return;
       const text=error.name==="NotAllowedError"?"Quyền camera đã bị từ chối. Hãy cho phép camera trong cài đặt website.":error.name==="NotReadableError"?"Không mở được camera. Kiểm tra ứng dụng khác đang sử dụng thiết bị.":error.message;
       await stop(text||"Không thể mở camera.","error");
@@ -73,7 +74,8 @@
     const timer=setTimeout(()=>controller.abort(),timeoutMs),began=performance.now();
     try{
       const headers={...token(),"Content-Type":"image/jpeg","X-Camera-Session":session,"X-Client-Captured-Ms":String(captured.began)};const classId=window.attendanceBridge?.getClassId?.();if(classId)headers["X-Class-Id"]=String(classId);
-      const response=await fetch(endpoint,{method:"POST",body:captured.blob,headers,signal:controller.signal});
+      const frameUrl=classId?endpoint+"?class_id="+encodeURIComponent(classId):endpoint;
+      const response=await fetch(frameUrl,{method:"POST",body:captured.blob,headers,signal:controller.signal});
       let data;try{data=await response.json();}catch{throw new Error('Backend trả phản hồi không hợp lệ. Kiểm tra Terminal và thử lại.');}if(!response.ok){const error=new Error(data.error?.message||"Backend xử lý thất bại.");error.status=response.status;throw error;}
       if(!Array.isArray(data.faces)||data.frame?.width!==captured.canvas.width||data.frame?.height!==captured.canvas.height)throw new Error("Kết quả backend không khớp khung hình.");
       const http_ms=performance.now()-began,stages={};
@@ -108,8 +110,8 @@
   }
   function boxes(ctx,faces,scale,ox=0,oy=0,names=false,width=10000){
     ctx.font="12px Segoe UI";ctx.lineWidth=2;
-    for(const face of faces){const b=face.box,unknown=face.unknown===true||face.scope_match===false;ctx.strokeStyle=getComputedStyle(document.documentElement).getPropertyValue(unknown?"--warning":names?"--success":"--primary").trim();ctx.strokeRect(ox+b.x*scale,oy+b.y*scale,b.w*scale,b.h*scale);
-      const label=names?(unknown?"Không xác định":face.top1.student?.full_name||"Ứng viên chưa xác nhận"):"#"+face.face_id+" · khuôn mặt";
+    for(const face of faces){const b=face.box,unknown=face.unknown===true||face.scope_match===false||face.status==='unknown'||face.name==='Không xác định'||face.label==='Không xác định';ctx.strokeStyle=getComputedStyle(document.documentElement).getPropertyValue(unknown?"--danger":names?"--success":"--primary").trim();ctx.strokeRect(ox+b.x*scale,oy+b.y*scale,b.w*scale,b.h*scale);
+      const label=names?(unknown?"Không xác định":face.name||face.top1.student?.full_name||"Ứng viên chưa xác nhận"):"#"+face.face_id+" · khuôn mặt";
       const tw=Math.min(width,ctx.measureText(label).width+10),x=Math.max(0,Math.min(width-tw,ox+b.x*scale)),y=Math.max(0,oy+b.y*scale-23);
       ctx.fillStyle=getComputedStyle(document.documentElement).getPropertyValue("--navy").trim();ctx.fillRect(x,y,tw,21);ctx.fillStyle=getComputedStyle(document.documentElement).getPropertyValue("--white").trim();ctx.fillText(label,x+5,y+15,tw-8);
     }
@@ -225,7 +227,7 @@
     ctx.font='600 12px Segoe UI';ctx.lineWidth=2;
     for(const t of items){
       const rect=window.SafeFaceTracks.project(t.box,video.videoWidth,video.videoHeight,width,height,mirror),{x:left,y:top,w,h}=rect;
-      ctx.strokeStyle=theme.getPropertyValue(t.unknown&&!t.stale?'--warning':'--success').trim();ctx.strokeRect(left,top,w,h);
+      ctx.strokeStyle=theme.getPropertyValue(t.unknown&&!t.stale?'--danger':'--success').trim();ctx.strokeRect(left,top,w,h);
       const f=t.candidate,p=f?.top1?.student,confirmed=p&&attendanceState.sessionId===window.attendanceBridge?.getSessionId()&&attendanceState.records.some(r=>r.student_id===p.id&&r.attendance_status==='PRESENT');
       const lines=t.unknown&&!t.stale?['Không xác định']:window.RecognitionDisplay.describe(f,t.stale,confirmed).lines;
       t.displayLines=lines;t.displayBox=rect;

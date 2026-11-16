@@ -20,7 +20,7 @@ OUTPUTS = ROOT / 'outputs'
 SETTING_KEYS = ('model_name', 'detector_backend', 'align', 'normalization',
                 'enforce_detection', 'expand_percentage', 'anti_spoofing', 'max_faces')
 logger = logging.getLogger(__name__)
-CLASS_SCOPE_MIN_COSINE=.50
+CLASS_SCOPE_MIN_COSINE=.70
 
 
 class EngineBusy(Exception):
@@ -318,6 +318,8 @@ class RecognitionEngine:
                     # Explicit public whitelist: no embedding, gallery image or filesystem path.
                     public_faces.append(dict(face_id=len(public_faces) + 1,
                         box=dict(x=x, y=y, w=right-x, h=bottom-y),
+                        status='unknown' if unknown else 'candidate',
+                        name='Không xác định' if unknown else self._public_identities.get(match['best_candidate'],{}).get('full_name'),
                         top1=dict(candidate=match['best_candidate'] if scope_match else None, similarity=match['best_similarity'] if scope_match else None,
                             student=self._public_identities.get(match['best_candidate']) if scope_match else None),
                         top2=dict(candidate=match['second_candidate'] if scope_match else None, similarity=match['second_similarity'] if scope_match else None),

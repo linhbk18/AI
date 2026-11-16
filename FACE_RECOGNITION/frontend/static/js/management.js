@@ -3,7 +3,7 @@
   const cfg=JSON.parse(document.getElementById('management-config').textContent);
   const $=id=>document.getElementById(id), main=$('main');
   const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  let allStudents=[],allClasses=[],detail=null,media=null,editorKind=null,editorId=null,enrollmentMode=null,enrollmentSession=null,enrollmentRunning=false;
+  let allStudents=[],allClasses=[],detail=null,media=null,editorKind=null,editorId=null,enrollmentMode=null,enrollmentSession=null,enrollmentRunning=false,enrollmentFrameController=null;
   let noticeTimer;
   let samplesPerPosture=6;
   const path=location.pathname.split('/').filter(Boolean),section=path[0]||'overview',identity=path[1]?Number(path[1]):null;
@@ -14,7 +14,7 @@
   async function api(url,options={}){
     const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),180000);
     try{
-      const response=await fetch(url,{...options,headers:{'X-Camera-Token':cfg.csrfToken,...(options.body instanceof FormData?{}:{'Content-Type':'application/json'}),...options.headers},signal:controller.signal});
+      const response=await fetch(url,{...options,headers:{'X-Camera-Token':cfg.csrfToken,...(options.body instanceof FormData?{}:{'Content-Type':'application/json'}),...options.headers},signal:options.signal||controller.signal});
       let data;try{data=await response.json();}catch{throw new Error('Backend trả kết quả không hợp lệ. Hãy kiểm tra kết nối.');}
       if(!response.ok)throw new Error(data.error?.message||'Yêu cầu thất bại.');
       return data;
@@ -67,7 +67,7 @@
     $('mapping-form')?.addEventListener('submit',e=>mutateForm(e,async()=>{const result=await send(`/api/students/${identity}/legacy-mapping`,'POST',{dataset_label:$('legacy-select').value,confirmed:$('mapping-confirm').checked});await studentDetail();notice(result.gallery_updated?'Đã liên kết và cập nhật gallery.':'Đã lưu liên kết; gallery sẽ cập nhật khi AI sẵn sàng hoặc xử lý khung tiếp theo.');}));
     $('reenroll-face').addEventListener('click',()=>openEnrollmentDialog({student_id:s.id,student_code:s.student_code,full_name:s.full_name,class_id:s.classes[0]?.id||''}));
   }
-  function stopMedia(){enrollmentRunning=false;media?.getTracks().forEach(t=>t.stop());media=null;const v=$('enroll-video');if(v){v.srcObject=null;}}
+  function stopMedia(){enrollmentRunning=false;enrollmentFrameController?.abort();enrollmentFrameController=null;media?.getTracks().forEach(t=>t.stop());media=null;const v=$('enroll-video');if(v){v.onloadedmetadata=null;v.srcObject=null;v.hidden=true;}}
   async function abandonEnrollment(){stopMedia();if(enrollmentSession)try{await send('/api/enrollment/cancel','POST',{session:enrollmentSession});}catch{}enrollmentSession=null;}
   const postureLabels=['Nhìn thẳng','Quay đầu sang trái','Quay đầu sang phải','Ngẩng nhẹ','Cúi nhẹ'];
   async function openEnrollmentDialog(existing=null){
@@ -75,53 +75,127 @@
     const classes=existing?{items:[]}:await api('/api/classes');
     const classSelect=existing?'':`<label class="field">Lớp học<select id="enroll-class" required><option value="">Chọn lớp…</option>${classes.items.map(c=>`<option value="${c.id}">${esc(c.class_code+' · '+c.class_name)}</option>`).join('')}</select></label>`;
     $('editor-title').textContent=existing?'Đăng ký lại khuôn mặt':'Thêm sinh viên bằng AI';
-    $('editor-fields').innerHTML=`<label class="field">Mã sinh viên<input id="enroll-code" value="${esc(existing?.student_code||'')}" maxlength="64" autocomplete="off" ${existing?'readonly':''} required><span id="code-status" class="muted" aria-live="polite"></span></label><label class="field">Họ và tên<input id="enroll-name" value="${esc(existing?.full_name||'')}" maxlength="160" ${existing?'readonly':''} required></label>${classSelect}<p class="muted">Hãy xác nhận đúng sinh viên trước khi bắt đầu. Hệ thống không thể chứng minh khuôn mặt trước camera thuộc mã sinh viên đã nhập.</p><div class="enroll-stage"><video id="enroll-video" autoplay muted playsinline class="enrollment-media" hidden></video><div class="enroll-face-guide" aria-hidden="true"></div></div><p id="enroll-instruction" class="enroll-instruction" aria-live="polite">Nhập thông tin rồi bật camera để bắt đầu.</p><div class="enroll-progress-list">${postureLabels.map((label,i)=>`<div class="enroll-progress-row" id="pose-row-${i}"><span class="pose-mark">○</span><span>${label}</span><span class="pose-count" id="pose-count-${i}">0/6</span></div>`).join('')}</div><div class="enroll-total"><progress id="enroll-total-progress" max="30" value="0"></progress><span id="enroll-total-label">0/30 mẫu</span></div><div class="camera-controls"><button type="button" class="button secondary" id="start-enroll-camera">◎ Đăng ký khuôn mặt bằng AI</button><button type="button" class="button secondary" id="retry-enroll-pose" hidden>Thử lại tư thế</button><button type="button" class="button secondary" id="restart-enroll" hidden>Làm lại từ đầu</button><button type="button" class="button secondary" id="stop-enroll-camera" disabled>Tắt camera</button></div><div id="duplicate-warning" class="form-error" role="status"></div><label class="check-label"><input id="identity-confirmed" type="checkbox">Tôi đã đối chiếu và xác nhận đúng sinh viên trước khi lưu.</label><label class="check-label" id="similarity-ack-row" hidden><input id="similarity-ack" type="checkbox">Tôi đã xem cảnh báo trùng khuôn mặt và xác nhận tiếp tục.</label><p id="enroll-timing" class="muted" aria-live="polite"></p>`;
+    $('editor-fields').innerHTML=`<label class="field">Mã sinh viên<input id="enroll-code" value="${esc(existing?.student_code||'')}" maxlength="64" autocomplete="off" ${existing?'readonly':''} required><span id="code-status" class="muted" aria-live="polite"></span></label><label class="field">Họ và tên<input id="enroll-name" value="${esc(existing?.full_name||'')}" maxlength="160" ${existing?'readonly':''} required></label>${classSelect}<p class="muted">Hãy xác nhận đúng sinh viên trước khi lưu. Camera có thể bật độc lập để thu mẫu khuôn mặt.</p><div class="enroll-toolbar"><label class="mirror-control"><input id="enroll-mirror" type="checkbox"> Lật gương</label><div class="camera-controls"><button type="button" class="button primary" id="start-enroll-camera">▶ Bật camera</button><button type="button" class="button secondary" id="stop-enroll-camera" disabled>■ Tắt camera</button></div><span id="enroll-camera-status" class="muted" aria-live="polite">Đang chờ bật camera...</span></div><div class="enroll-stage"><video id="enroll-video" autoplay muted playsinline class="enrollment-media" hidden></video><div class="enroll-face-guide" aria-hidden="true"></div></div><p id="enroll-instruction" class="enroll-instruction" aria-live="polite">Nhấn “Bật camera” để bắt đầu lấy mẫu.</p><div class="enroll-progress-list">${postureLabels.map((label,i)=>`<div class="enroll-progress-row" id="pose-row-${i}"><span class="pose-mark">○</span><span>${label}</span><span class="pose-count" id="pose-count-${i}">0/6</span></div>`).join('')}</div><div class="enroll-total"><progress id="enroll-total-progress" max="30" value="0"></progress><span id="enroll-total-label">0/30 mẫu</span></div><div class="camera-controls"><button type="button" class="button secondary" id="retry-enroll-pose" hidden>Thử lại tư thế</button><button type="button" class="button secondary" id="restart-enroll" hidden>Làm lại từ đầu</button></div><div id="duplicate-warning" class="form-error" role="status"></div><label class="check-label"><input id="identity-confirmed" type="checkbox">Tôi đã đối chiếu và xác nhận đúng sinh viên trước khi lưu.</label><label class="check-label" id="similarity-ack-row" hidden><input id="similarity-ack" type="checkbox">Tôi đã xem cảnh báo trùng khuôn mặt và xác nhận tiếp tục.</label><p id="enroll-timing" class="muted" aria-live="polite"></p>`;
     const submit=$('editor-form').querySelector('[type="submit"]');submit.textContent='Hoàn tất đăng ký';submit.disabled=true;
     $('editor').classList.add('enrollment-dialog');$('editor-error').textContent='';$('editor').showModal();
-    let codeVersion=0,codeValid=!!existing,cameraStarting=false;
-    const ensureEnrollmentCamera=async()=>{
-      if(cameraStarting||media||enrollmentRunning)return;
-      if(!existing&&(!codeValid||!$('enroll-name').value.trim()||!$('enroll-class').value))return;
-      cameraStarting=true;const start=$('start-enroll-camera');start.disabled=true;
+    let cameraStarting=false;
+    const startSampling=async()=>{
       try{
-        if(!enrollmentSession){const started=await send('/api/enrollment/start','POST',{});enrollmentSession=started.session;samplesPerPosture=started.samples_per_posture||6;updateEnrollmentProgress([0,0,0,0,0]);}
-        if(!navigator.mediaDevices?.getUserMedia)throw new Error('Trình duyệt không hỗ trợ camera. Hãy dùng HTTPS hoặc localhost và cấp quyền camera.');
-        media=await navigator.mediaDevices.getUserMedia({video:{width:{ideal:640},height:{ideal:480}},audio:false});
-        media.getVideoTracks().forEach(track=>track.addEventListener('ended',()=>{if(enrollmentRunning){stopMedia();start.disabled=false;$('enroll-instruction').textContent='Camera đã ngắt. Dữ liệu đã thu vẫn được giữ; hãy bật lại camera.';}}));
-        const video=$('enroll-video');video.srcObject=media;video.hidden=false;await video.play();
-        $('stop-enroll-camera').disabled=false;$('retry-enroll-pose').hidden=true;$('restart-enroll').hidden=false;
-        enrollmentRunning=true;$('enroll-instruction').textContent='Nhìn thẳng vào camera.';pumpEnrollment();
-      }catch(e){stopMedia();start.disabled=false;notice(e.name==='NotAllowedError'?'Bạn đã từ chối quyền camera. Hãy mở cài đặt quyền riêng tư của trình duyệt và cho phép camera.':e.name==='NotFoundError'?'Không tìm thấy camera. Hãy kết nối camera rồi thử lại.':e.name==='NotReadableError'?'Camera đang được ứng dụng khác sử dụng. Hãy đóng ứng dụng đó rồi thử lại.':e.name==='SecurityError'?'Trình duyệt chặn camera. Hãy mở ứng dụng bằng localhost hoặc HTTPS và cấp quyền camera.':e.message,true);}
-      finally{cameraStarting=false;}
+        if(!enrollmentSession){
+          const started=await send('/api/enrollment/start','POST',{});
+          enrollmentSession=started.session;
+          samplesPerPosture=started.samples_per_posture||6;
+          updateEnrollmentProgress([0,0,0,0,0]);
+        }
+        $('stop-enroll-camera').disabled=false;
+        $('retry-enroll-pose').hidden=true;
+        $('restart-enroll').hidden=false;
+        $('enroll-camera-status').textContent='Camera đang chạy · đang phát hiện khuôn mặt...';
+        enrollmentRunning=true;
+        $('enroll-instruction').textContent='Nhìn thẳng vào camera.';
+        pumpEnrollment();
+      }catch(error){
+        console.error("Chi tiết lỗi:", error);
+        $('start-enroll-camera').disabled=false;
+        $('stop-enroll-camera').disabled=false;
+        $('enroll-camera-status').textContent='Camera đã bật nhưng không khởi tạo được luồng lấy mẫu.';
+        notice('Camera đã bật, nhưng chưa khởi tạo được phiên lấy mẫu: '+error.message,true);
+      }finally{
+        cameraStarting=false;
+      }
     };
-    const evaluateEnrollment=()=>{clearTimeout(window.enrollCodeTimer);window.enrollCodeTimer=setTimeout(async()=>{await validate();if(codeValid)await ensureEnrollmentCamera();},350);};
-    const validate=async()=>{if(existing)return;const input=$('enroll-code'),status=$('code-status'),version=++codeVersion;codeValid=false;$('start-enroll-camera').disabled=true;submit.disabled=true;if(!input.value.trim()){status.textContent='Nhập mã sinh viên.';return;}try{const result=await send('/api/students/check-code','POST',{student_code:input.value.trim()});if(version!==codeVersion)return;codeValid=!result.exists;status.textContent=result.exists?'Mã sinh viên đã tồn tại.':'Mã sinh viên có thể sử dụng.';status.classList.toggle('form-error',result.exists);if(result.exists)$('start-enroll-camera').disabled=true;}catch(e){status.textContent=e.message;codeValid=false;}};
-    $('enroll-code').addEventListener('input',evaluateEnrollment);
-    $('enroll-name').addEventListener('input',()=>{if(codeValid)evaluateEnrollment();});
-    $('enroll-class')?.addEventListener('change',()=>{if(codeValid)evaluateEnrollment();});
-    $('enroll-code').addEventListener('blur',validate);
+    const startCamera=(event)=>{
+      event?.preventDefault();event?.stopPropagation();
+      const start=$('start-enroll-camera');
+      if(cameraStarting||enrollmentRunning)return;
+      if(media){
+        cameraStarting=true;
+        start.disabled=true;
+        $('enroll-camera-status').textContent='Đang khởi tạo lại luồng lấy mẫu...';
+        startSampling();
+        return;
+      }
+      cameraStarting=true;
+      start.disabled=true;
+      $('enroll-camera-status').textContent='Đang xin quyền camera...';
+      if(!navigator.mediaDevices?.getUserMedia){
+        cameraStarting=false;
+        start.disabled=false;
+        notice('Trình duyệt không hỗ trợ camera. Hãy dùng HTTPS hoặc localhost và cấp quyền camera.',true);
+        $('enroll-camera-status').textContent='Không hỗ trợ camera.';
+        return;
+      }
+      navigator.mediaDevices.getUserMedia({video:{width:{ideal:640},height:{ideal:480}},audio:false})
+        .then(stream=>{
+          media=stream;
+          const videoElement=$('enroll-video');
+          // 2 việc BẮT BUỘC ĐẦU TIÊN: hiển thị hình ảnh nội bộ (Local Stream)
+          videoElement.srcObject=stream;
+          videoElement.hidden=false;
+          videoElement.play().catch(playErr=>console.warn('Lỗi video play:', playErr));
+
+          $('stop-enroll-camera').disabled=false;
+          $('enroll-camera-status').textContent='Camera đã bật. Đang chờ hình ảnh sẵn sàng...';
+
+          media.getVideoTracks().forEach(track=>track.addEventListener('ended',()=>{
+            if(enrollmentRunning||media){
+              stopMedia();
+              start.disabled=false;
+              $('stop-enroll-camera').disabled=true;
+              $('enroll-camera-status').textContent='Camera đã ngắt.';
+              $('enroll-instruction').textContent='Camera đã ngắt. Dữ liệu đã thu vẫn được giữ; hãy bật lại camera.';
+            }
+          }));
+
+          // Bọc hàm bắt đầu luồng lấy mẫu vào sự kiện onloadedmetadata
+          const launchSampling=()=>{
+            videoElement.onloadedmetadata=null;
+            startSampling();
+          };
+
+          if(videoElement.readyState>=1&&videoElement.videoWidth>0){
+            launchSampling();
+          }else{
+            videoElement.onloadedmetadata=launchSampling;
+          }
+        })
+        .catch(error=>{
+          console.error("Chi tiết lỗi:", error);
+          stopMedia();
+          cameraStarting=false;
+          start.disabled=false;
+          $('stop-enroll-camera').disabled=true;
+          $('enroll-camera-status').textContent='Không bật được camera.';
+          notice(error.name==='NotAllowedError'?'Bạn đã từ chối quyền camera. Hãy mở cài đặt quyền riêng tư của trình duyệt và cho phép camera.':error.name==='NotFoundError'?'Không tìm thấy camera. Hãy kết nối camera rồi thử lại.':error.name==='NotReadableError'?'Camera đang được ứng dụng khác sử dụng. Hãy đóng ứng dụng đó rồi thử lại.':error.name==='SecurityError'?'Trình duyệt chặn camera. Hãy mở ứng dụng bằng localhost hoặc HTTPS và cấp quyền camera.':error.message,true);
+        });
+    };
+    const stopCamera=event=>{event?.preventDefault();event?.stopPropagation();stopMedia();$('start-enroll-camera').disabled=false;$('stop-enroll-camera').disabled=true;$('enroll-camera-status').textContent='Đang chờ bật camera...';$('enroll-instruction').textContent='Camera đã tạm dừng. Bật lại để tiếp tục với dữ liệu đã thu.';};
+    const toggleMirror=()=>{$('enroll-video').style.transform=$('enroll-mirror').checked?'scaleX(-1)':'';};
     const updateSubmit=()=>{submit.disabled=!enrollmentSession||!$('identity-confirmed').checked||(!$('similarity-ack-row').hidden&&!$('similarity-ack').checked);};
     $('identity-confirmed').addEventListener('change',updateSubmit);
     $('similarity-ack').addEventListener('change',updateSubmit);
-    $('start-enroll-camera').addEventListener('click',async()=>{if(!existing&&!codeValid)await validate();await ensureEnrollmentCamera();});
-    $('stop-enroll-camera').addEventListener('click',()=>{stopMedia();$('start-enroll-camera').disabled=false;$('enroll-instruction').textContent='Camera đã tạm dừng. Bật lại để tiếp tục với dữ liệu đã thu.';});
+    $('start-enroll-camera').addEventListener('click',startCamera);
+    $('stop-enroll-camera').addEventListener('click',stopCamera);
+    $('enroll-mirror').addEventListener('change',toggleMirror);
     $('retry-enroll-pose').addEventListener('click',async()=>{try{await send('/api/enrollment/retry','POST',{session:enrollmentSession});$('retry-enroll-pose').hidden=true;$('enroll-instruction').textContent='Thử lại tư thế đang hướng dẫn.';enrollmentRunning=true;pumpEnrollment();}catch(e){notice(e.message,true);}});
     $('restart-enroll').addEventListener('click',async()=>{try{enrollmentRunning=false;await send('/api/enrollment/restart','POST',{session:enrollmentSession});updateEnrollmentProgress([0,0,0,0,0]);$('duplicate-warning').textContent='';$('similarity-ack-row').hidden=true;$('similarity-ack').checked=false;$('identity-confirmed').checked=false;submit.disabled=true;$('enroll-instruction').textContent='Nhìn thẳng vào camera.';$('start-enroll-camera').disabled=false;$('start-enroll-camera').click();}catch(e){notice(e.message,true);}});
-    if(existing){$('code-status').textContent='Đăng ký lại cho hồ sơ đã xác nhận.';$('start-enroll-camera').disabled=false;}
-    if(!existing)validate();else ensureEnrollmentCamera();
+    if(existing)$('code-status').textContent='Đăng ký lại cho hồ sơ đã xác nhận.';
   }
   function updateEnrollmentProgress(counts){let total=0;counts.forEach((count,i)=>{total+=count;$(`pose-count-${i}`).textContent=`${count}/${samplesPerPosture}`;$(`pose-row-${i}`).classList.toggle('done',count>=samplesPerPosture);$(`pose-row-${i}`).querySelector('.pose-mark').textContent=count>=samplesPerPosture?'✓':'○';});$('enroll-total-progress').max=5*samplesPerPosture;$('enroll-total-progress').value=total;$('enroll-total-label').textContent=`${total}/${5*samplesPerPosture} mẫu`;}
   async function pumpEnrollment(){
-    if(!enrollmentRunning)return;const video=$('enroll-video');
+    if(!enrollmentRunning)return;const video=$('enroll-video');let frameController=null;
     if(!video||video.readyState<2||!video.videoWidth){setTimeout(pumpEnrollment,150);return;}
     const canvas=document.createElement('canvas');canvas.width=Math.min(640,video.videoWidth);canvas.height=Math.round(video.videoHeight*canvas.width/video.videoWidth);canvas.getContext('2d').drawImage(video,0,0,canvas.width,canvas.height);
     try{
       const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',.82));if(!blob)throw new Error('Không đọc được hình ảnh camera.');
       const bytes=new Uint8Array(await blob.arrayBuffer());let binary='';for(let i=0;i<bytes.length;i+=0x8000)binary+=String.fromCharCode(...bytes.subarray(i,i+0x8000));
-      const result=await send('/api/enrollment/frame','POST',{session:enrollmentSession,frame:btoa(binary)});
+      enrollmentFrameController=frameController=new AbortController();
+      const result=await api('/api/enrollment/frame',{method:'POST',body:JSON.stringify({session:enrollmentSession,frame:btoa(binary)}),signal:frameController.signal});
+      if(!enrollmentRunning)return;
       if(result.counts)updateEnrollmentProgress(result.counts);
+      $('enroll-camera-status').textContent=`Đang chạy · đã phát hiện ${result.face_count||0} khuôn mặt`;
       if(result.timeout){enrollmentRunning=false;$('retry-enroll-pose').hidden=false;$('enroll-instruction').textContent=result.reason;return;}
-      if(result.complete){enrollmentRunning=false;stopMedia();$('stop-enroll-camera').disabled=true;$('enroll-instruction').textContent='Đã thu thập đủ dữ liệu khuôn mặt. Đang kiểm tra khả năng trùng…';
+      if(result.complete){enrollmentRunning=false;stopMedia();$('stop-enroll-camera').disabled=true;$('start-enroll-camera').disabled=false;$('enroll-camera-status').textContent='Đã thu đủ mẫu · camera đã tắt';$('enroll-instruction').textContent='Đã thu thập đủ dữ liệu khuôn mặt. Đang kiểm tra khả năng trùng…';
         const checked=await send('/api/enrollment/duplicate-check','POST',{session:enrollmentSession,student_id:enrollmentMode==='replace'?Number(identity):undefined});
         if(checked.warnings.length){$('duplicate-warning').textContent='Cảnh báo: độ tương đồng cao với '+checked.warnings.map(x=>`${x.student} (${x.similarity})`).join(', ')+'. Hãy đối chiếu danh tính trước khi tiếp tục.';$('similarity-ack-row').hidden=false;}
         else $('duplicate-warning').textContent='Không phát hiện cảnh báo trùng theo ngưỡng kiểm tra.';
@@ -129,7 +203,8 @@
         $('identity-confirmed').dispatchEvent(new Event('change'));return;
       }
       if(result.posture){const active=result.next_posture||result.posture;const i=['thẳng','quay_trái','quay_phải','ngẩng_nhẹ','cúi_nhẹ'].indexOf(active);$('enroll-instruction').textContent=(postureLabels[i]||'Điều chỉnh tư thế')+'. '+(result.reason||'');}
-    }catch(e){$('enroll-instruction').textContent=e.message;}
+    }catch(e){if(enrollmentRunning&&e.name!=='AbortError')$('enroll-instruction').textContent=e.message;}
+    finally{if(enrollmentFrameController===frameController)enrollmentFrameController=null;}
     if(enrollmentRunning)setTimeout(pumpEnrollment,100);
   }
   $('editor-form').addEventListener('submit',async e=>{
@@ -137,6 +212,11 @@
     try{
       if(enrollmentMode){
         if(!enrollmentSession)throw new Error('Hãy hoàn tất thu thập qua camera trước khi lưu.');
+        if(!$('enroll-code').value.trim()||!$('enroll-name').value.trim()||(enrollmentMode==='create'&&!$('enroll-class').value))throw new Error('Hãy nhập mã sinh viên, họ tên và chọn lớp trước khi lưu.');
+        if(enrollmentMode==='create'){
+          const check=await send('/api/students/check-code','POST',{student_code:$('enroll-code').value.trim()});
+          if(check.exists)throw new Error('Mã sinh viên đã tồn tại. Hãy nhập mã khác; dữ liệu khuôn mặt đã thu vẫn được giữ.');
+        }
         const payload={session:enrollmentSession,student_id:enrollmentMode==='replace'?Number(identity):undefined,
           student_code:$('enroll-code').value.trim(),full_name:$('enroll-name').value.trim(),class_id:enrollmentMode==='create'?Number($('enroll-class').value):undefined,
           identity_confirmed:$('identity-confirmed').checked,gallery_warning_acknowledged:$('similarity-ack')?.checked||false};

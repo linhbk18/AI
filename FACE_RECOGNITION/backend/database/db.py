@@ -31,6 +31,8 @@ class ManagementStore:
         self.path=Path(path);self.path.parent.mkdir(parents=True,exist_ok=True)
         self.legacy=json.loads(Path(legacy_path).read_text(encoding='utf-8'))
         self.labels=sorted({r['student_id'] for r in self.legacy})
+        self._gallery_revision_cache=0
+        self._class_members_cache={}
         self.initialize()
 
     @contextmanager
@@ -75,10 +77,11 @@ class ManagementStore:
             if 'student_code_is_temporary' not in {r['name'] for r in db.execute('PRAGMA table_info(students)')}:
                 db.execute('ALTER TABLE students ADD COLUMN student_code_is_temporary INTEGER NOT NULL DEFAULT 0 CHECK(student_code_is_temporary IN (0,1))')
             db.execute("UPDATE management_meta SET value=2 WHERE key='schema_version' AND value<2")
+            self._gallery_revision_cache=db.execute("SELECT value FROM management_meta WHERE key='gallery_revision'").fetchone()[0]
 
-    @staticmethod
-    def bump(db):
+    def bump(self,db):
         db.execute("UPDATE management_meta SET value=value+1 WHERE key='gallery_revision'")
+        self._gallery_revision_cache+=1
 
     @staticmethod
     def require(db,kind,identity):
@@ -277,7 +280,20 @@ class ManagementStore:
             self.bump(db)
 
     def gallery_revision(self):
-        with self.connection() as db: return db.execute("SELECT value FROM management_meta WHERE key='gallery_revision'").fetchone()[0]
+        return self._gallery_revision_cache
+
+    def class_student_ids(self,class_id):
+        key=(self._gallery_revision_cache,int(class_id))
+        cached=self._class_members_cache.get(key)
+        if cached is not None:return cached
+        with self.connection() as db:
+            self.require(db,'classes',int(class_id))
+            ids=tuple(row[0] for row in db.execute(
+                'SELECT m.student_id FROM class_students m JOIN students s ON s.id=m.student_id WHERE m.class_id=? AND s.deleted_at IS NULL ORDER BY m.student_id',
+                (int(class_id),)))
+        if len(self._class_members_cache)>=128:self._class_members_cache.clear()
+        self._class_members_cache[key]=ids
+        return ids
 
     def gallery_snapshot(self):
         with self.connection() as db:

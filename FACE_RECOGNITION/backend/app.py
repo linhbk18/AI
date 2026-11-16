@@ -152,11 +152,20 @@ def create_app(engine=None, start_models=True, overrides=None):
         try:attendance_context=attendance.context(attendance_id) if attendance_id is not None else None
         except DomainError as exc:return error('ATTENDANCE_SESSION_INVALID',str(exc),exc.status)
         requested_class=options.get('class_id')
+        if attendance_context is None and requested_class is not None:
+            try:
+                requested_class=attendance.identity(requested_class,'Lớp')
+                allowed_student_ids=store.class_student_ids(requested_class)
+            except DomainError as exc:
+                return error('INVALID_CLASS_SCOPE',str(exc),getattr(exc,'status',400))
+            attendance_id=None
+        else:
+            allowed_student_ids=store.class_student_ids(attendance_context['class_id']) if attendance_context is not None else None
         if attendance_context is not None:
             if requested_class is not None and str(requested_class)!=str(attendance_context['class_id']):
                 return error('CLASS_SCOPE_MISMATCH','Lớp gửi lên không khớp với buổi điểm danh.',409)
             requested_class=attendance_context['class_id']
-        elif requested_class is not None:
+        elif requested_class is not None and attendance_id is not None and attendance_context is None:
             return error('ATTENDANCE_SESSION_REQUIRED','Cần buổi điểm danh hợp lệ để giới hạn lớp.',400)
         if not isinstance(profile,str) or (profile not in PROFILES and profile!='retinaface_original'):
             return error('UNKNOWN_PROFILE','Cấu hình camera không được hỗ trợ.',400)
@@ -172,6 +181,7 @@ def create_app(engine=None, start_models=True, overrides=None):
                 return error('SESSION_LIMIT', 'Đang có quá nhiều phiên camera. Hãy tắt phiên cũ.', 429)
             session_id = secrets.token_urlsafe(24)
             sessions[session_id] = dict(cancelled=threading.Event(), last_seen=now,profile=profile,attendance_id=attendance_id,class_id=requested_class,
+                allowed_student_ids=allowed_student_ids,
                 continuity=Continuity(),sequence=0,pending_auto={},verified_history={})
         return jsonify(session_id=session_id,profile=profile)
 
@@ -218,10 +228,16 @@ def create_app(engine=None, start_models=True, overrides=None):
             return error('SESSION_STOPPED', 'Camera đã tắt hoặc phiên đã hết hạn.', 409)
         try:attendance_context=attendance.context(session['attendance_id']) if session.get('attendance_id') is not None else None
         except DomainError as exc:return error('ATTENDANCE_SESSION_INVALID',str(exc),exc.status)
-        if attendance_context is not None:
-            supplied_class=request.headers.get('X-Class-Id')
-            if supplied_class!=str(session['class_id']):
+        frame_class_id=None
+        if session.get('class_id') is not None:
+            supplied_class=request.args.get('class_id') or request.headers.get('X-Class-Id')
+            try:frame_class_id=attendance.identity(int(supplied_class),'Lớp')
+            except (TypeError,ValueError,DomainError):
+                return error('CLASS_SCOPE_MISMATCH','Khung hình phải gửi class_id hợp lệ của phiên camera.',409)
+            if frame_class_id!=session['class_id']:
                 return error('CLASS_SCOPE_MISMATCH','Lớp của khung hình không khớp với phiên camera.',409)
+            try:allowed_student_ids=store.class_student_ids(frame_class_id)
+            except DomainError as exc:return error('INVALID_CLASS_SCOPE',str(exc),exc.status)
         if request.mimetype != 'image/jpeg':
             return error('JPEG_REQUIRED', 'Khung hình phải có định dạng JPEG.', 415)
         raw = request.stream.read(1024*1024+1)
@@ -248,9 +264,9 @@ def create_app(engine=None, start_models=True, overrides=None):
                     snapshot=session['continuity'].snapshot(bgr,received_at)
             kwargs=dict(profile=session['profile'])
             inference_started=time.monotonic()
-            if attendance_context is not None:
-                kwargs['allowed_student_ids']=attendance_context['student_ids']
-                kwargs['class_id']=session['class_id']
+            if session.get('class_id') is not None:
+                kwargs['allowed_student_ids']=allowed_student_ids
+                kwargs['class_id']=frame_class_id
             result = (service.detect_preview(bgr,session['cancelled'].is_set) if preview else
                       service.analyze(bgr, session['cancelled'].is_set,**kwargs))
             if attendance_context is not None:

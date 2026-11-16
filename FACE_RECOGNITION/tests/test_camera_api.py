@@ -27,12 +27,14 @@ class FakeEngine:
                           attendance_enabled=False, threshold_enabled=False)
         self.calls = 0
         self.failure = None
+        self.last_kwargs={}
     def health(self):
         return dict(ready=self.ready, state='ready' if self.ready else 'loading',
                     model_name='ArcFace', detector_backend='retinaface', registered_embeddings=92,
                     registered_students=5, identity_confirmation_enabled=False, attendance_enabled=False)
     def analyze(self, bgr, cancelled,profile='retinaface_reuse',**kwargs):
         self.calls += 1
+        self.last_kwargs=kwargs
         if self.failure:
             raise self.failure
         if cancelled():
@@ -100,6 +102,25 @@ class CameraAPIContract(unittest.TestCase):
         self.assertEqual(self.client.post('/api/recognize',data=jpeg(),content_type='image/jpeg',headers=headers).status_code,409)
         headers['X-Class-Id']=str(classroom['id'])
         self.assertEqual(self.client.post('/api/recognize',data=jpeg(),content_type='image/jpeg',headers=headers).status_code,200)
+        standalone=self.client.post('/api/camera/sessions',headers=self.headers,json={'class_id':classroom['id']})
+        self.assertEqual(standalone.status_code,200)
+        wrong_header=dict(self.headers,**{'X-Camera-Session':standalone.json['session_id'],'X-Class-Id':str(classroom['id']+1)})
+        self.assertEqual(self.client.post('/api/recognize',data=jpeg(),content_type='image/jpeg',headers=wrong_header).status_code,409)
+        no_header=dict(self.headers,**{'X-Camera-Session':standalone.json['session_id']})
+        self.assertEqual(self.client.post('/api/recognize?class_id='+str(classroom['id']),data=jpeg(),content_type='image/jpeg',headers=no_header).status_code,200)
+        self.assertEqual(self.engine.last_kwargs['class_id'],classroom['id'])
+        self.assertEqual(self.engine.last_kwargs['allowed_student_ids'],(student['id'],))
+    def test_class_membership_cache_tracks_roster_updates(self):
+        store=self.app.extensions['management_store']
+        classroom=store.save('classes',dict(class_code='CACHE-SCOPE',class_name='Cache scope'))
+        first=store.save('students',dict(student_code='CACHE-1',full_name='First'))
+        second=store.save('students',dict(student_code='CACHE-2',full_name='Second'))
+        store.membership(classroom['id'],first['id'])
+        self.assertEqual(store.class_student_ids(classroom['id']),(first['id'],))
+        store.membership(classroom['id'],second['id'])
+        self.assertEqual(store.class_student_ids(classroom['id']),(first['id'],second['id']))
+        store.membership(classroom['id'],first['id'],True)
+        self.assertEqual(store.class_student_ids(classroom['id']),(second['id'],))
     def test_multiple_faces_no_identity_confirmation(self):
         faces = [dict(face_id=i, box=dict(x=i*20,y=20,w=50,h=60),
                       top1=dict(candidate=name, similarity=.6), top2=dict(candidate='Other',similarity=.4),

@@ -130,6 +130,8 @@ with app.test_client() as c:
         self.assertFalse(self.client.get(f"/api/students/{s['id']}").json['face_count'])
         self.assertTrue(self.post('/api/students/check-code',dict(student_code='SV-TEST')).json['exists'])
         self.assertFalse(self.post('/api/students/check-code',dict(student_code='SV-NEW')).json['exists'])
+        self.assertFalse(self.post('/api/students/check-code',dict(student_code='241121514142')).json['exists'])
+        self.assertEqual(self.post('/api/students/check-code',dict(student_code='')).status_code,400)
         started=self.post('/api/enrollment/start',{});self.assertEqual(started.status_code,201)
         self.assertEqual(self.client.get('/api/overview').json['students'],1)
         self.post('/api/enrollment/cancel',dict(session=started.json['session']))
