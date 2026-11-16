@@ -28,6 +28,27 @@ class YuNetDetector:
         with self._guard:
             return self._detect_faces(image,dimension,score_threshold)
 
+    def detect_landmarks(self,image,dimension=640,score_threshold=.6):
+        """Boxes + all five YuNet landmarks for enrollment quality/pose checks."""
+        import cv2
+        with self._guard:
+            height,width=image.shape[:2]
+            scale=dimension/max(height,width)
+            size=(max(1,round(width*scale)),max(1,round(height*scale)))
+            resized=cv2.resize(image,size,interpolation=cv2.INTER_AREA) if size!=(width,height) else image
+            self.model.setInputSize(size)
+            self.model.setScoreThreshold(score_threshold)
+            _,faces=self.model.detect(resized)
+        result=[]
+        if faces is None: return result
+        sx,sy=size[0]/width,size[1]/height
+        point=lambda i,f:(float(f[i]/sx),float(f[i+1]/sy))
+        for f in faces:
+            result.append(dict(box=dict(x=float(f[0]/sx),y=float(f[1]/sy),w=float(f[2]/sx),h=float(f[3]/sy)),
+                right_eye=point(4,f),left_eye=point(6,f),nose=point(8,f),mouth_right=point(10,f),mouth_left=point(12,f),
+                score=float(f[-1])))
+        return result
+
     def _detect_faces(self,image,dimension,score_threshold):
         import cv2
         from deepface.models.Detector import FacialAreaRegion

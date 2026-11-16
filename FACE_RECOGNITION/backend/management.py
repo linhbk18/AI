@@ -28,6 +28,8 @@ def management_blueprint(store,engine,token):
     @bp.get('/classes/<int:identity>')
     @bp.get('/students')
     @bp.get('/students/<int:identity>')
+    @bp.get('/students/new')
+    @bp.get('/students/<int:identity>/face')
     def page(identity=None):
         return render_template('management.html',csrf_token=token)
 
@@ -77,6 +79,8 @@ def management_blueprint(store,engine,token):
 
     @bp.post('/api/students/<int:student_id>/faces')
     def register_face(student_id):
+        if not current_app.config.get('LEGACY_PHOTO_UPLOAD_ENABLED'):
+            raise DomainError('Đăng ký bằng ảnh tải lên/chụp thủ công đã ngừng. Dùng "Đăng ký khuôn mặt bằng AI" qua camera trực tiếp.',410)
         store.detail('students',student_id)
         if request.form.get('confirmed')!='true':
             raise DomainError('Hãy xác nhận ảnh thuộc đúng sinh viên đã chọn. AI không tự xác minh điều này.')

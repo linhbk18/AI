@@ -5,6 +5,7 @@
   <title>Quản lý đào tạo · Sinh viên</title>
   <link rel="stylesheet" href="{{ url_for('static',filename='css/management.css') }}">
   <script id="management-config" type="application/json">{{ {'csrfToken': csrf_token}|tojson }}</script>
+  <script defer src="{{ url_for('static',filename='js/face_enrollment.js') }}"></script>
   <script defer src="{{ url_for('static',filename='js/management.js') }}"></script>
   <link rel="stylesheet" href="{{ url_for('static',filename='css/design-system.css') }}">
 </head>
