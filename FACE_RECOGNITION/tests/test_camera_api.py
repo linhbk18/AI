@@ -69,6 +69,19 @@ class CameraAPIContract(unittest.TestCase):
                 self.assertEqual(response.status_code, 200)
         for path in ('/outputs/face_embeddings.json', '/DATASET/Test/3.jpg', '/api/attendance'):
             self.assertEqual(self.client.get(path).status_code, 404)
+    def test_asset_urls_change_after_edits_and_code_mismatch_requests_restart(self):
+        from unittest.mock import patch
+        html=self.client.get('/attendance').get_data(as_text=True)
+        self.assertRegex(html,r'js/attendance\.js\?v=[0-9]+')
+        self.assertFalse(self.client.get('/api/health').json['code_reload_required'])
+        with patch('backend.app.source_fingerprint',return_value='changed-by-checkout'):
+            status=self.client.get('/api/health').json
+            self.assertTrue(status['code_reload_required'])
+            self.assertFalse(status['ready'])
+            self.assertFalse(status['automatic_attendance']['ready'])
+            self.assertIn('source_reload_required',status['automatic_attendance']['blocking_reasons'])
+        self.assertTrue(self.client.get('/api/health').json['ready'])
+
     def test_no_face_clears_identity_contract(self):
         result = self.post()
         self.assertEqual(result.status_code, 200)
