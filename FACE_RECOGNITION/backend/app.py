@@ -73,7 +73,7 @@ def create_app(engine=None, start_models=True, overrides=None):
             origin = request.headers.get('Origin')
             if origin and origin.rstrip('/') != request.host_url.rstrip('/'):
                 return error('ORIGIN_REJECTED', 'Yêu cầu phải đến từ website localhost này.', 403)
-            if not secrets.compare_digest(request.headers.get('X-Camera-Token', ''), token):
+            if request.path != '/api/extract_face' and not secrets.compare_digest(request.headers.get('X-Camera-Token', ''), token):
                 return error('TOKEN_REQUIRED', 'Phiên trang đã hết hạn. Hãy tải lại trang.', 403)
 
     @app.after_request

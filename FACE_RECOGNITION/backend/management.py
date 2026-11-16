@@ -245,39 +245,48 @@ def management_blueprint(store,engine,token):
 
     @bp.post('/api/extract_face')
     def extract_face():
-        data=request.get_json(silent=True)
-        if not isinstance(data,dict):
-            return jsonify(success=False,face_found=False,reason='Dữ liệu không hợp lệ.'),400
-        encoded=data.get('frame') or data.get('image') or ''
-        if not isinstance(encoded,str) or not encoded:
-            return jsonify(success=False,face_found=False,reason='Không tìm thấy dữ liệu ảnh Base64.'),400
-        if encoded.startswith('data:'):
-            encoded=encoded.partition(',')[2]
         try:
-            raw=base64.b64decode(encoded,validate=False)
-            import cv2
-            frame=cv2.imdecode(np.frombuffer(raw,dtype=np.uint8),cv2.IMREAD_COLOR)
-        except Exception as e:
-            return jsonify(success=False,face_found=False,reason=f'Lỗi giải mã ảnh: {str(e)}'),400
-        if frame is None or frame.size==0:
-            return jsonify(success=False,face_found=False,reason='Không đọc được ảnh từ camera.'),422
-        try:
-            if hasattr(engine,'extract_face_stateless'):
-                result=engine.extract_face_stateless(frame)
-            elif hasattr(engine,'enrollment_frame'):
-                res=engine.enrollment_frame(frame,'thẳng')
-                result=dict(success=res.get('accepted',True),face_found=True,face_count=1,posture='thẳng',
-                    posture_label='Nhìn thẳng',yaw=0.0,pitch=0.0,embedding=res.get('embedding',[0.0]*512),embedding_ms=res.get('embedding_ms',1.0))
+            data=request.get_json(silent=True)
+            if not isinstance(data,dict):
+                return jsonify(success=False,face_found=False,message='Dữ liệu không hợp lệ.',reason='Dữ liệu không hợp lệ.'),200
+            encoded=data.get('frame') or data.get('image') or ''
+            if not isinstance(encoded,str) or not encoded:
+                return jsonify(success=False,face_found=False,message='Không tìm thấy dữ liệu ảnh Base64.',reason='Không tìm thấy dữ liệu ảnh Base64.'),200
+            if encoded.startswith('data:'):
+                encoded=encoded.partition(',')[2]
+            try:
+                raw=base64.b64decode(encoded,validate=False)
+                import cv2
+                frame=cv2.imdecode(np.frombuffer(raw,dtype=np.uint8),cv2.IMREAD_COLOR)
+            except Exception as e:
+                return jsonify(success=False,face_found=False,message=f'Lỗi giải mã ảnh: {str(e)}',reason=f'Lỗi giải mã ảnh: {str(e)}'),200
+            if frame is None or frame.size==0:
+                return jsonify(success=False,face_found=False,message='Không đọc được ảnh từ camera.',reason='Không đọc được ảnh từ camera.'),200
+            try:
+                if hasattr(engine,'extract_face_stateless'):
+                    result=engine.extract_face_stateless(frame)
+                elif hasattr(engine,'enrollment_frame'):
+                    res=engine.enrollment_frame(frame,'thẳng')
+                    result=dict(success=res.get('accepted',True),face_found=True,face_count=1,posture='thẳng',
+                        posture_label='Nhìn thẳng',message='Trích xuất khuôn mặt thành công.',yaw=0.0,pitch=0.0,embedding=res.get('embedding',[0.0]*512),embedding_ms=res.get('embedding_ms',1.0))
+                else:
+                    return jsonify(success=False,message='Mô hình AI chưa sẵn sàng.',reason='Mô hình AI chưa sẵn sàng.'),200
+            except EngineBusy:
+                return jsonify(success=False,busy=True,message='AI đang bận xử lý, vui lòng giữ nguyên tư thế.',reason='AI đang bận xử lý, vui lòng giữ nguyên tư thế.'),200
+            except EngineUnavailable:
+                return jsonify(success=False,message='Mô hình AI chưa sẵn sàng.',reason='Mô hình AI chưa sẵn sàng.'),200
+            except Exception as exc:
+                current_app.logger.exception('extract_face inference failed')
+                return jsonify(success=False,message=f'Không tìm thấy mặt hoặc lỗi xử lý: {str(exc)}',reason=str(exc)),200
+
+            if not result.get('success'):
+                result.setdefault('message',result.get('reason','Không tìm thấy mặt.'))
             else:
-                return jsonify(success=False,reason='Mô hình AI chưa sẵn sàng.'),503
-        except EngineBusy:
-            return jsonify(success=False,busy=True,reason='AI đang bận xử lý khung trước.'),429
-        except EngineUnavailable:
-            return jsonify(success=False,reason='Mô hình AI chưa sẵn sàng.'),503
-        except Exception as exc:
-            current_app.logger.exception('extract_face inference failed')
-            return jsonify(success=False,reason=f'Lỗi xử lý khuôn mặt: {str(exc)}'),500
-        return jsonify(result),200
+                result.setdefault('message','Trích xuất khuôn mặt thành công.')
+            return jsonify(result),200
+        except Exception as top_exc:
+            current_app.logger.exception('extract_face unexpected error')
+            return jsonify(success=False,message=f'Lỗi server: {str(top_exc)}',reason=str(top_exc)),200
 
     @bp.post('/api/register_student')
     def register_student():

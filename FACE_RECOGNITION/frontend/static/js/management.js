@@ -67,8 +67,8 @@
     $('mapping-form')?.addEventListener('submit',e=>mutateForm(e,async()=>{const result=await send(`/api/students/${identity}/legacy-mapping`,'POST',{dataset_label:$('legacy-select').value,confirmed:$('mapping-confirm').checked});await studentDetail();notice(result.gallery_updated?'Đã liên kết và cập nhật gallery.':'Đã lưu liên kết; gallery sẽ cập nhật khi AI sẵn sàng hoặc xử lý khung tiếp theo.');}));
     $('reenroll-face').addEventListener('click',()=>openEnrollmentDialog({student_id:s.id,student_code:s.student_code,full_name:s.full_name,class_id:s.classes[0]?.id||''}));
   }
-  let samplingInterval=null,isExtracting=false,collectedEmbeddings=[];
-  function stopSamplingLoop(){if(samplingInterval){clearInterval(samplingInterval);samplingInterval=null;}isExtracting=false;}
+  let isLoopRunning=false,loopTimeoutId=null,collectedEmbeddings=[];
+  function stopSamplingLoop(){isLoopRunning=false;if(loopTimeoutId){clearTimeout(loopTimeoutId);loopTimeoutId=null;}}
   function stopMedia(){stopSamplingLoop();media?.getTracks().forEach(t=>t.stop());media=null;const v=$('enroll-video');if(v){v.onloadedmetadata=null;v.srcObject=null;v.hidden=true;}}
   async function abandonEnrollment(){stopSamplingLoop();stopMedia();collectedEmbeddings=[];}
   const postureKeys=['thẳng','quay_trái','quay_phải','ngẩng_nhẹ','cúi_nhẹ'];
@@ -107,58 +107,82 @@
 
     function startSamplingLoop(){
       stopSamplingLoop();
+      isLoopRunning=true;
       $('enroll-camera-status').textContent='Camera đang chạy · Đang tự động quét khuôn mặt...';
       $('restart-enroll').hidden=false;$('retry-enroll-pose').hidden=true;
-      samplingInterval=setInterval(async()=>{
-        if(isExtracting)return;
-        const video=$('enroll-video');
-        if(!video||video.paused||video.ended||!video.videoWidth)return;
-        const counts=postureKeys.map(k=>collectedEmbeddings.filter(item=>item.posture===k).length);
-        if(counts.every(c=>c>=samplesPerPosture)||collectedEmbeddings.length>=totalTargetCount){
-          stopSamplingLoop();
-          $('enroll-camera-status').textContent='Đã thu đủ 30 mẫu khuôn mặt';
-          $('enroll-instruction').textContent='Đã thu đủ dữ liệu. Hãy xác nhận thông tin và nhấn Hoàn tất đăng ký.';
-          notice('Đã thu thập đủ 30 mẫu khuôn mặt!');
-          updateSubmit();
-          return;
-        }
-        isExtracting=true;
+      runSamplingStep();
+    }
+
+    async function runSamplingStep(){
+      if(!isLoopRunning)return;
+      const video=$('enroll-video');
+      if(!video||video.paused||video.ended||!video.videoWidth){
+        if(isLoopRunning)loopTimeoutId=setTimeout(runSamplingStep,300);
+        return;
+      }
+      const counts=postureKeys.map(k=>collectedEmbeddings.filter(item=>item.posture===k).length);
+      if(counts.every(c=>c>=samplesPerPosture)||collectedEmbeddings.length>=totalTargetCount){
+        stopSamplingLoop();
+        $('enroll-camera-status').textContent='Đã thu đủ 30 mẫu khuôn mặt';
+        $('enroll-instruction').textContent='Đã thu đủ dữ liệu. Hãy xác nhận thông tin và nhấn Hoàn tất đăng ký.';
+        notice('Đã thu thập đủ dữ liệu 5 tư thế!');
+        updateSubmit();
+        return;
+      }
+      try{
+        const canvas=document.createElement('canvas');
+        canvas.width=Math.min(640,video.videoWidth);
+        canvas.height=Math.round(video.videoHeight*canvas.width/video.videoWidth);
+        canvas.getContext('2d').drawImage(video,0,0,canvas.width,canvas.height);
+        const base64Data=canvas.toDataURL('image/jpeg',0.82);
+
+        const response=await fetch('/api/extract_face',{
+          method:'POST',
+          headers:{'Content-Type':'application/json','X-Camera-Token':cfg.csrfToken},
+          body:JSON.stringify({frame:base64Data})
+        });
+
+        let responseData=null;
         try{
-          const canvas=document.createElement('canvas');
-          canvas.width=Math.min(640,video.videoWidth);
-          canvas.height=Math.round(video.videoHeight*canvas.width/video.videoWidth);
-          canvas.getContext('2d').drawImage(video,0,0,canvas.width,canvas.height);
-          const base64Data=canvas.toDataURL('image/jpeg',0.82);
-          const res=await api('/api/extract_face',{method:'POST',body:JSON.stringify({frame:base64Data})});
-          if(res.success&&res.embedding&&res.posture){
-            const p=res.posture;
-            const currentCount=collectedEmbeddings.filter(item=>item.posture===p).length;
-            if(currentCount<samplesPerPosture){
-              collectedEmbeddings.push({posture:p,embedding:res.embedding,yaw:res.yaw,pitch:res.pitch});
-              updateEnrollmentProgress();
-              $('enroll-camera-status').textContent=`Đang lấy mẫu · Nhận diện: ${res.posture_label||p} (Yaw: ${res.yaw}°, Pitch: ${res.pitch}°)`;
-              if(collectedEmbeddings.length>=totalTargetCount){
-                stopSamplingLoop();
-                $('enroll-camera-status').textContent='Đã thu đủ dữ liệu (30/30 mẫu)';
-                $('enroll-instruction').textContent='Đã thu thập đủ dữ liệu 5 tư thế. Hãy xác nhận và nhấn Hoàn tất đăng ký.';
-                notice('Đã thu thập đủ 30 mẫu khuôn mặt!');
-                updateSubmit();
-              }
-            }else{
-              const nextIdx=postureKeys.findIndex(k=>collectedEmbeddings.filter(item=>item.posture===k).length<samplesPerPosture);
-              if(nextIdx!==-1){
-                $('enroll-camera-status').textContent=`Tư thế "${res.posture_label||p}" đã đủ. Hãy chuyển sang: ${postureLabels[nextIdx]}`;
-              }
-            }
-          }else if(res.reason){
-            $('enroll-camera-status').textContent=`Đang quét: ${res.reason}`;
-          }
-        }catch(err){
-          console.error("Chi tiết lỗi:", err);
-        }finally{
-          isExtracting=false;
+          responseData=await response.json();
+        }catch(jsonErr){
+          console.error("Lỗi khi parse JSON từ API:", jsonErr);
         }
-      },450);
+
+        console.log("Kết quả từ API:", responseData);
+
+        if(responseData&&responseData.success&&responseData.embedding&&responseData.posture){
+          const p=responseData.posture;
+          const currentCount=collectedEmbeddings.filter(item=>item.posture===p).length;
+          if(currentCount<samplesPerPosture){
+            collectedEmbeddings.push({posture:p,embedding:responseData.embedding,yaw:responseData.yaw,pitch:responseData.pitch});
+            updateEnrollmentProgress();
+            $('enroll-camera-status').textContent=`Đang lấy mẫu · Nhận diện: ${responseData.posture_label||p} (Yaw: ${responseData.yaw}°, Pitch: ${responseData.pitch}°)`;
+            if(collectedEmbeddings.length>=totalTargetCount){
+              stopSamplingLoop();
+              $('enroll-camera-status').textContent='Đã thu đủ dữ liệu (30/30 mẫu)';
+              $('enroll-instruction').textContent='Đã thu thập đủ dữ liệu 5 tư thế. Hãy xác nhận và nhấn Hoàn tất đăng ký.';
+              notice('Đã thu thập đủ 30 mẫu khuôn mặt!');
+              updateSubmit();
+              return;
+            }
+          }else{
+            const nextIdx=postureKeys.findIndex(k=>collectedEmbeddings.filter(item=>item.posture===k).length<samplesPerPosture);
+            if(nextIdx!==-1){
+              $('enroll-camera-status').textContent=`Tư thế "${responseData.posture_label||p}" đã đủ ${samplesPerPosture} mẫu. Hãy chuyển sang: ${postureLabels[nextIdx]}`;
+            }
+          }
+        }else{
+          const reasonMsg=responseData?.message||responseData?.reason||'Đang quét khuôn mặt...';
+          $('enroll-camera-status').textContent=`Trạng thái: ${reasonMsg}`;
+        }
+      }catch(error){
+        console.error("Lỗi khi gửi frame:", error);
+        $('enroll-camera-status').textContent=`Lỗi khi gửi frame: ${error.message}`;
+      }
+      if(isLoopRunning){
+        loopTimeoutId=setTimeout(runSamplingStep,350);
+      }
     }
 
     const startCamera=(event)=>{
