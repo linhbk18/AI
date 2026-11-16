@@ -67,7 +67,7 @@ class Storage(unittest.TestCase):
         # No production policy or attendance database is changed.
         automatic=AutomaticAttendance(self.service,True)
         face=dict(identity_confirmed=True,outside_class=False,eligible_for_confirmation=True,
-            top1={'student':{'id':self.people[0]['id']}})
+            top1={'student':{'id':self.people[0]['id']},'similarity':.9},margin=.2)
         stale=automatic.apply(self.sid,[face],lambda:False,time.monotonic()-8,lambda:False)
         self.assertFalse(stale['changed'])
         self.assertEqual(self.service.detail(self.sid)['stats']['present'],0)
@@ -79,6 +79,27 @@ class Storage(unittest.TestCase):
         self.assertTrue(committed['changed'])
         self.assertEqual(committed['session']['records'][0]['recognition_source'],'AI_VERIFIED')
         self.assertFalse(automatic.apply(self.sid,[face],lambda:False,time.monotonic(),lambda:True)['changed'])
+
+    def test_auto_audit_survives_manual_edit_and_restart(self):
+        student=self.people[0]['id']
+        evidence={student:dict(similarity=.91,margin=.21)}
+        self.service.confirm_verified(self.sid,[student],lambda:False,time.monotonic(),lambda:True,evidence)
+        row=self.service.detail(self.sid)['records'][0]
+        self.assertEqual((row['source'],row['similarity'],row['margin']),('auto',.91,.21))
+        self.service.finish(self.sid)
+        self.service.edit(self.sid,student,dict(attendance_status='ABSENT',confirmed=True,reason='Protocol audit test'))
+        reopened=AttendanceService(self.store)
+        self.assertEqual(reopened.detail(self.sid)['records'][0]['source'],'manual')
+        with self.store.connection() as db:
+            saved=db.execute('SELECT * FROM attendance_auto_audit WHERE record_id=?',(row['id'],)).fetchall()
+            self.assertEqual(len(saved),1)
+            self.assertEqual(saved[0]['similarity'],.91)
+
+    def test_removed_membership_cannot_auto_mark_old_roster(self):
+        with self.store.connection() as db:db.execute('DELETE FROM class_students WHERE student_id=?',(self.people[0]['id'],))
+        with self.assertRaises(DomainError):
+            self.service.confirm_verified(self.sid,[self.people[0]['id']],lambda:False,time.monotonic(),lambda:True)
+        self.assertEqual(self.service.detail(self.sid)['stats']['present'],0)
 
     def test_reviewed_static_batch_is_manual_atomic_and_open_only(self):
         with self.assertRaises(DomainError):self.service.confirm_reviewed(self.sid,[p['id'] for p in self.people])

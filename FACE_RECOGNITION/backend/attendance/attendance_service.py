@@ -2,6 +2,9 @@
 from datetime import date,datetime
 from zoneinfo import ZoneInfo
 import time
+import sqlite3
+import shutil
+from pathlib import Path
 
 from ..database.db import DomainError,now,text
 
@@ -30,7 +33,25 @@ class AttendanceService:
                 id INTEGER PRIMARY KEY,record_id INTEGER NOT NULL REFERENCES attendance_records(id) ON DELETE RESTRICT,
                 old_status TEXT NOT NULL,new_status TEXT NOT NULL,reason TEXT NOT NULL,created_at TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS ix_attendance_date ON attendance_sessions(session_date,class_id);
+            CREATE TABLE IF NOT EXISTS attendance_auto_audit (id INTEGER PRIMARY KEY,record_id INTEGER NOT NULL REFERENCES attendance_records(id),similarity REAL,margin REAL,created_at TEXT NOT NULL);
             ''')
+
+        with store.connection() as db:
+            columns={r['name'] for r in db.execute('PRAGMA table_info(attendance_records)')}
+        additions={'source': "TEXT CHECK(source IN ('auto','manual'))", 'similarity':'REAL', 'margin':'REAL'}
+        if any(name not in columns for name in additions):
+            folder=Path(store.path).parent/'backups'/('attendance-schema-'+str(time.time_ns()))
+            folder.mkdir(parents=True)
+            with sqlite3.connect(store.path) as src,sqlite3.connect(folder/'management.sqlite3') as dst:src.backup(dst)
+            gallery=Path(store.path).parent/'face_embeddings.json'
+            if gallery.is_file():shutil.copy2(gallery,folder/gallery.name)
+            with store.connection() as db:
+                db.execute('BEGIN IMMEDIATE')
+                columns={r['name'] for r in db.execute('PRAGMA table_info(attendance_records)')}
+                for name,kind in additions.items():
+                    if name not in columns:db.execute(f'ALTER TABLE attendance_records ADD COLUMN {name} {kind}')
+                db.execute("UPDATE attendance_records SET source=CASE recognition_source WHEN 'AI_VERIFIED' THEN 'auto' WHEN 'MANUAL' THEN 'manual' END WHERE source IS NULL")
+                db.execute("CREATE TABLE IF NOT EXISTS attendance_auto_audit (id INTEGER PRIMARY KEY,record_id INTEGER NOT NULL REFERENCES attendance_records(id),similarity REAL,margin REAL,created_at TEXT NOT NULL)")
 
     @staticmethod
     def identity(value,label='ID'):
@@ -97,7 +118,7 @@ class AttendanceService:
             if not record:raise DomainError('Sinh viên không thuộc danh sách của buổi này.',422)
             changed=record['attendance_status']!='PRESENT'
             if changed:
-                stamp=now();db.execute("UPDATE attendance_records SET attendance_status='PRESENT',recognition_source='MANUAL',confirmed_at=?,updated_at=? WHERE id=?",(stamp,stamp,record['id']))
+                stamp=now();db.execute("UPDATE attendance_records SET attendance_status='PRESENT',recognition_source='MANUAL',source='manual',confirmed_at=?,updated_at=? WHERE id=?",(stamp,stamp,record['id']))
         return dict(changed=changed,session=self.detail(identity))
 
     def finish(self,identity):
@@ -105,7 +126,7 @@ class AttendanceService:
             db.execute('BEGIN IMMEDIATE');session=self.session(db,identity)
             if session['status']=='IN_PROGRESS':
                 stamp=now()
-                db.execute("UPDATE attendance_records SET attendance_status='ABSENT',recognition_source='MANUAL',updated_at=? WHERE session_id=? AND attendance_status IS NULL",(stamp,identity))
+                db.execute("UPDATE attendance_records SET attendance_status='ABSENT',recognition_source='MANUAL',source='manual',updated_at=? WHERE session_id=? AND attendance_status IS NULL",(stamp,identity))
                 db.execute("UPDATE attendance_sessions SET status='COMPLETED',ended_at=? WHERE id=?",(stamp,identity))
         return self.detail(identity)
 
@@ -122,10 +143,10 @@ class AttendanceService:
                 records.append(r)
             for r in records:
                 if r['attendance_status']!='PRESENT':
-                    stamp=now();db.execute("UPDATE attendance_records SET attendance_status='PRESENT',recognition_source='MANUAL',confirmed_at=?,updated_at=? WHERE id=?",(stamp,stamp,r['id']));changed+=1
+                    stamp=now();db.execute("UPDATE attendance_records SET attendance_status='PRESENT',recognition_source='MANUAL',source='manual',confirmed_at=?,updated_at=? WHERE id=?",(stamp,stamp,r['id']));changed+=1
         return dict(changed=changed,session=self.detail(identity))
 
-    def confirm_verified(self,identity,student_ids,cancelled,received_at,continuity_check=None):
+    def confirm_verified(self,identity,student_ids,cancelled,received_at,continuity_check=None,evidence=None):
         """Internal only: no HTTP route accepts a caller's identity_confirmed flag."""
         self.identity(identity)
         changed=0
@@ -140,11 +161,16 @@ class AttendanceService:
                 self.identity(sid,'Sinh viên')
                 r=db.execute('SELECT * FROM attendance_records WHERE session_id=? AND student_id=?',(identity,sid)).fetchone()
                 if not r:raise DomainError('Sinh viên không thuộc buổi này.',422)
+                if not db.execute('SELECT 1 FROM students s JOIN class_students m ON m.student_id=s.id JOIN attendance_sessions a ON a.class_id=m.class_id WHERE a.id=? AND s.id=? AND s.deleted_at IS NULL',(identity,sid)).fetchone():raise DomainError('Sinh viên không còn thuộc lớp đang điểm danh.',422)
                 records.append(r)
             for r in records:
                 if cancelled() or not fresh():raise DomainError('Liên kết khuôn mặt đã mất hoặc camera đã tắt.',409)
                 if r['attendance_status']!='PRESENT':
-                    stamp=now();db.execute("UPDATE attendance_records SET attendance_status='PRESENT',recognition_source='AI_VERIFIED',confirmed_at=?,updated_at=? WHERE id=?",(stamp,stamp,r['id']));changed+=1
+                    scores=(evidence or {}).get(r['student_id'],{})
+                    stamp=now()
+                    db.execute("UPDATE attendance_records SET attendance_status='PRESENT',recognition_source='AI_VERIFIED',source='auto',similarity=?,margin=?,confirmed_at=?,updated_at=? WHERE id=?",(scores.get('similarity'),scores.get('margin'),stamp,stamp,r['id']))
+                    db.execute('INSERT INTO attendance_auto_audit(record_id,similarity,margin,created_at) VALUES (?,?,?,?)',(r['id'],scores.get('similarity'),scores.get('margin'),stamp))
+                    changed+=1
         return dict(enabled=True,changed=bool(changed),session=self.detail(identity))
 
     def edit(self,identity,student_id,data):
@@ -158,7 +184,7 @@ class AttendanceService:
             if r['attendance_status']!=data['attendance_status']:
                 stamp=now()
                 db.execute('INSERT INTO attendance_edits(record_id,old_status,new_status,reason,created_at) VALUES (?,?,?,?,?)',(r['id'],r['attendance_status'],data['attendance_status'],reason,stamp))
-                db.execute("UPDATE attendance_records SET attendance_status=?,recognition_source='MANUAL',confirmed_at=?,updated_at=? WHERE id=?",(data['attendance_status'],stamp,stamp,r['id']))
+                db.execute("UPDATE attendance_records SET attendance_status=?,recognition_source='MANUAL',source='manual',confirmed_at=?,updated_at=? WHERE id=?",(data['attendance_status'],stamp,stamp,r['id']))
         return self.detail(identity)
 
     def history(self,class_id=None,day=None):

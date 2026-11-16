@@ -19,6 +19,7 @@ from .management import management_blueprint
 from .attendance.attendance_service import AttendanceService
 from .attendance.automatic import AutomaticAttendance
 from .attendance.continuity import Continuity
+from .attendance.stability import observe, REQUIRED, WINDOW
 from .media import media_blueprint
 from .test_labeling import labeling_blueprint
 from .face_recognition.results import normalize_faces
@@ -109,7 +110,8 @@ def create_app(engine=None, start_models=True, overrides=None):
         status['can_enable']=available['ready'] and matcher is not None and matcher.policy is not None
         status['enable_blocking_reasons']=available['blocking_reasons']
         status['enable_message']=available['message']
-        status['required_consistent_results']=2
+        status['required_consistent_results']=REQUIRED
+        status['consistency_window']=WINDOW
         if matcher is not None and getattr(matcher,'policy',None) is None:
             status['ready']=False;status['blocking_reasons'].append('policy_not_loaded_for_runtime_gallery')
             status['message']+=' Policy chưa nạp cho gallery runtime; đánh giá đúng signature và khởi động lại Flask sau publish.'
@@ -252,15 +254,17 @@ def create_app(engine=None, start_models=True, overrides=None):
                 with sessions_guard:
                     grants=[];current_history={};pending_consistency=False
                     for face,saved in zip(result['faces'],linked):
-                        if (saved and face.get('identity_confirmed') is True and not face.get('outside_class')
-                            and face.get('eligible_for_confirmation') and sequence==session['sequence']):
-                            student_id=face.get('top1',{}).get('student',{}).get('id')
-                            previous=session['verified_history'].get(saved['id'],{})
-                            count=previous.get('count',0)+1 if previous.get('student_id')==student_id and previous.get('sequence')==sequence-1 else 1
-                            current_history[saved['id']]=dict(student_id=student_id,sequence=sequence,count=count)
-                            face['verification_consistency']=dict(observed=count,required=2)
-                            if count<2:
+                        frame_verified=face.get('identity_confirmed') is True
+                        face['identity_confirmed']=False
+                        if saved and sequence==session['sequence']:
+                            student_id=face.get('top1',{}).get('student',{}).get('id') if frame_verified else None
+                            state,consistency=observe(session['verified_history'].get(saved['id'],{}),student_id,sequence)
+                            current_history[saved['id']]=state
+                            face['verification_consistency']=consistency
+                            face['identity_confirmed']=consistency['ready']
+                            if not consistency['ready']:
                                 pending_consistency=True;continue
+                            if face.get('outside_class') or not face.get('eligible_for_confirmation'):continue
                             grant=secrets.token_urlsafe(32)
                             session['pending_auto'][grant]=dict(face=face,track=saved,sequence=sequence,created_at=time.monotonic(),
                                 signature=getattr(service.matcher,'signature',None),policy=json.dumps(service.matcher.policy,sort_keys=True))
@@ -276,7 +280,7 @@ def create_app(engine=None, start_models=True, overrides=None):
             records=attendance.detail(session['attendance_id'])['records'] if attendance_context else []
             result['recognition_results']=normalize_faces(result['faces'],'live_camera',records)
             for public,face in zip(result['recognition_results'],result['faces']):
-                public['auto_attendance_eligible']=bool(face.get('identity_confirmed') and face.get('tracking',{}).get('valid') and result.get('attendance_enabled'))
+                public['auto_attendance_eligible']=bool(face.get('identity_confirmed') and face.get('tracking',{}).get('valid') and face.get('verification_consistency',{}).get('ready') and not face.get('outside_class') and result.get('attendance_enabled'))
                 public['presence_verified']=public['auto_attendance_eligible']
                 public['presence_verification_method']='server_track_continuity_not_anti_spoofing' if public['presence_verified'] else None
             serialize_start=perf_counter()

@@ -45,7 +45,7 @@
         const list=matches[i];if(list.length!==1||matches.filter(m=>m.includes(list[0])).length!==1)continue;
         const saved=list[0],track=this.tracks.find(t=>t.id===saved.id),face=faces[i];
         if(!track||track.invalid||now-saved.at>30000||now-track.at>2500||difference(saved.signature,track.signature)>=.065)continue;
-        track.candidate=face.top1?.student&&Number.isFinite(face.top1.similarity)&&!face.outside_class&&face.eligible_for_confirmation!==false?face:null;
+        track.candidate=face.top1?.student&&Number.isFinite(face.top1.similarity)?face:null;
         track.unknown=!track.candidate;track.stale=false;
         // Display lease only. Cached candidates are never automatic-attendance evidence.
         track.expires=Math.min(now+20000,saved.at+30000);track.removeAt=Math.min(now+30000,saved.at+40000);
