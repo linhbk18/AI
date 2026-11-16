@@ -16,6 +16,7 @@ from werkzeug.exceptions import HTTPException
 from .config import Config, FRONTEND, ROOT
 from .database.db import ManagementStore
 from .management import management_blueprint
+from .enrollment_routes import enrollment_blueprint
 from .attendance.attendance_service import AttendanceService
 from .attendance.automatic import AutomaticAttendance
 from .attendance.continuity import Continuity
@@ -62,6 +63,9 @@ def create_app(engine=None, start_models=True, overrides=None):
     if hasattr(service,'configure_store'):
         service.configure_store(store)
     app.register_blueprint(management_blueprint(store,service,token))
+    enrollment_bp=enrollment_blueprint(store,service,app.config.get('ENROLLMENT_CONFIG_PATH'),app.config.get('ENROLLMENT_BACKUP_DIR'))
+    app.register_blueprint(enrollment_bp);app.extensions['enrollment_sessions']=enrollment_bp.enrollment_sessions
+    app.extensions['enrollment_worker']=enrollment_bp.enrollment_worker
     def camera_config():
         return dict(csrfToken=token,maxFrameDimension=app.config['CLIENT_FRAME_DIMENSION'],frameIntervalMs=app.config['FRAME_INTERVAL_MS'],requestTimeoutMs=app.config['REQUEST_TIMEOUT_MS'],profiles=PROFILES)
     app.register_blueprint(attendance_blueprint(attendance,token,camera_config))

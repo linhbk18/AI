@@ -3,10 +3,11 @@
   const cfg=JSON.parse(document.getElementById('management-config').textContent);
   const $=id=>document.getElementById(id), main=$('main');
   const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  let allStudents=[],allClasses=[],detail=null,media=null,pendingImage=null,previewUrl=null,editorKind=null,editorId=null;
+  let allStudents=[],allClasses=[],detail=null,editorKind=null,editorId=null;
   let noticeTimer;
-  let mediaGeneration=0;
-  const path=location.pathname.split('/').filter(Boolean),section=path[0]||'overview',identity=path[1]?Number(path[1]):null;
+  const path=location.pathname.split('/').filter(Boolean),section=path[0]||'overview',identity=path[1]&&path[1]!=='new'?Number(path[1]):null;
+  const enrollView=section==='students'&&(path[1]==='new'||path[2]==='face');
+  const poseNames={front:'Nhìn thẳng',left:'Quay trái',right:'Quay phải',up:'Ngẩng nhẹ',down:'Cúi nhẹ'};
   const titles={overview:'Tổng quan',classes:'Quản lý lớp học',students:'Quản lý sinh viên'};
   $('breadcrumb').textContent=titles[section]||'Quản lý';
   document.querySelector(`[data-nav="${section}"]`)?.classList.add('active');
@@ -25,15 +26,15 @@
   const badge=n=>`<span class="badge ${n?'success':''}">${n?`Đã đăng ký · ${n} vector`:'Chưa đăng ký'}</span>`;
   const studentCode=s=>`${esc(s.student_code)}${s.student_code_is_temporary?' <span class="badge">Mã tạm · demo</span>':''}`;
   const heading=(title,subtitle,action='')=>`<div class="page-heading"><div><p class="eyebrow">QUẢN LÝ ĐÀO TẠO</p><h1>${esc(title)}</h1><p class="subtitle">${esc(subtitle)}</p></div>${action}</div>`;
-  const addButton=kind=>`<button class="button primary" data-action="new" data-kind="${kind}">＋ Thêm ${kind==='classes'?'lớp học':'sinh viên'}</button>`;
+  const addButton=kind=>kind==='students'?'<a class="button primary" href="/students/new">＋ Thêm sinh viên</a>':`<button class="button primary" data-action="new" data-kind="${kind}">＋ Thêm lớp học</button>`;
   function studentRows(students,removable=false){return students.map(s=>`<tr><td class="code">${studentCode(s)}</td><td><a href="/students/${s.id}" class="name-cell"><span class="avatar">${esc(s.full_name.trim().split(/\s+/).map(x=>x[0]).slice(-2).join(''))}</span><span class="entity-name">${esc(s.full_name)}</span></a></td><td>${badge(s.face_count)}</td><td>${esc(s.classes.map(c=>c.class_code).join(', ')||'Chưa phân lớp')}</td><td><div class="actions">${removable?`<button class="text-button danger" data-action="remove-member" data-id="${s.id}">Gỡ khỏi lớp</button>`:`<a class="text-button" href="/students/${s.id}">Chi tiết</a><button class="text-button" data-action="edit" data-kind="students" data-id="${s.id}">Sửa</button><button class="text-button danger" data-action="delete" data-kind="students" data-id="${s.id}">Xóa</button>`}</div></td></tr>`).join('');}
   function studentTable(rows,remove=false){return `<div class="table-scroll"><table><thead><tr><th>MÃ SINH VIÊN</th><th>HỌ VÀ TÊN</th><th>KHUÔN MẶT</th><th>LỚP THAM GIA</th><th></th></tr></thead><tbody>${studentRows(rows,remove)}</tbody></table></div>`;}
   async function overview(){
     const data=await api('/api/overview');
     main.innerHTML=heading('Tổng quan','Một nơi để quản lý lớp học, hồ sơ sinh viên và đăng ký khuôn mặt.')+
       `<div class="metrics">${[[data.classes,'Lớp học','Lớp đang được quản lý','▤'],[data.students,'Sinh viên','Hồ sơ đang hoạt động','♙'],[data.registered_students,'Đã đăng ký khuôn mặt','Sinh viên có dữ liệu khuôn mặt','◎']].map(([n,label,caption,icon])=>`<article class="metric"><div class="metric-icon" aria-hidden="true">${icon}</div><div class="metric-label">${label}</div><div class="metric-value">${n}</div><div class="metric-caption">${caption}</div></article>`).join('')}</div>`+
-      `<div class="info-strip"><span aria-hidden="true">ⓘ</span><div><strong>Bắt đầu từ hồ sơ chính xác</strong>Tạo lớp và sinh viên, sau đó đăng ký ảnh hoặc liên kết dữ liệu khuôn mặt đã có. Điểm danh chỉ được ghi sau khi con người xác nhận.</div></div>
-      <section class="panel"><div class="panel-heading"><h2>Chuẩn bị dữ liệu lớp học</h2><span class="badge">Quản lý dữ liệu</span></div><div class="panel-body steps"><article class="step"><div class="step-number">01 / TỔ CHỨC</div><h3>Tạo lớp học</h3><p>Quản lý mã lớp, tên lớp và danh sách sinh viên cùng tham gia.</p><a href="/classes" class="button secondary">Quản lý lớp học →</a></article><article class="step"><div class="step-number">02 / HỒ SƠ</div><h3>Thêm sinh viên</h3><p>Nhập mã sinh viên thật, họ tên và phân vào một hoặc nhiều lớp.</p><a href="/students" class="button secondary">Quản lý sinh viên →</a></article><article class="step"><div class="step-number">03 / KHUÔN MẶT</div><h3>Đăng ký khuôn mặt</h3><p>Mở hồ sơ để tải ảnh, chụp camera hoặc liên kết tên dataset thủ công.</p><a href="/students" class="button secondary">Chọn sinh viên →</a></article></div></section>`;
+      `<div class="info-strip"><span aria-hidden="true">ⓘ</span><div><strong>Bắt đầu từ hồ sơ chính xác</strong>Tạo lớp, sau đó thêm sinh viên: AI tự học khuôn mặt qua camera trực tiếp. Điểm danh chỉ được ghi sau khi con người xác nhận.</div></div>
+      <section class="panel"><div class="panel-heading"><h2>Chuẩn bị dữ liệu lớp học</h2><span class="badge">Quản lý dữ liệu</span></div><div class="panel-body steps"><article class="step"><div class="step-number">01 / TỔ CHỨC</div><h3>Tạo lớp học</h3><p>Quản lý mã lớp, tên lớp và danh sách sinh viên cùng tham gia.</p><a href="/classes" class="button secondary">Quản lý lớp học →</a></article><article class="step"><div class="step-number">02 / HỒ SƠ</div><h3>Thêm sinh viên</h3><p>Nhập mã sinh viên, họ tên, chọn lớp rồi để AI học khuôn mặt qua camera.</p><a href="/students/new" class="button secondary">Thêm sinh viên →</a></article><article class="step"><div class="step-number">03 / KHUÔN MẶT</div><h3>Đăng ký khuôn mặt</h3><p>Sinh viên quay đầu theo hướng dẫn; AI tự lấy mẫu. Có thể đăng ký lại từ hồ sơ.</p><a href="/students" class="button secondary">Chọn sinh viên →</a></article></div></section>`;
   }
   async function collection(query=''){
     const kind=section,isStudent=kind==='students';
@@ -53,37 +54,17 @@
     $('member-form').addEventListener('submit',e=>mutateForm(e,async()=>{await send(`/api/classes/${identity}/students`,'POST',{student_id:Number($('member-select').value)});await classDetail();notice('Đã thêm sinh viên vào lớp.');}));
   }
   async function studentDetail(){
-    stopMedia();releasePreview();pendingImage=null;
     const [s,classes,legacy]=await Promise.all([api(`/api/students/${identity}`),api('/api/classes'),api('/api/legacy-gallery')]);
     detail=s;allClasses=classes.items;
     const available=allClasses.filter(c=>!s.classes.some(member=>member.id===c.id));
     main.innerHTML=`<a class="back-link" href="/students">← Danh sách sinh viên</a>`+heading(s.full_name,s.student_code,`<button class="button secondary" data-action="edit" data-kind="students" data-id="${s.id}">Sửa hồ sơ</button>`)+
       `<div class="details-grid"><div><section class="panel"><div class="panel-heading"><h2>Hồ sơ sinh viên</h2>${badge(s.face_count)}</div><div class="panel-body"><dl><div class="detail-item"><dt>Mã sinh viên</dt><dd>${studentCode(s)}</dd></div><div class="detail-item"><dt>Họ và tên</dt><dd>${esc(s.full_name)}</dd></div><div class="detail-item"><dt>Ngày tạo hồ sơ</dt><dd>${esc(new Date(s.created_at).toLocaleString('vi-VN'))}</dd></div></dl></div></section>
       <section class="panel"><div class="panel-heading"><h2>Lớp tham gia <span class="count">${s.classes.length}</span></h2></div><div class="panel-body">${s.classes.length?s.classes.map(c=>`<div class="list-item"><a class="entity-name" href="/classes/${c.id}">${esc(c.class_code)}<span class="entity-sub">${esc(c.class_name)}</span></a><button class="text-button danger" data-action="remove-class" data-id="${c.id}">Gỡ</button></div>`).join(''):'<p class="muted">Chưa phân vào lớp học nào.</p>'}<form id="student-class-form" class="inline-form section-gap"><label class="field">Chọn lớp<select id="class-select" required><option value="">Chọn lớp học…</option>${available.map(c=>`<option value="${c.id}">${esc(c.class_code+' · '+c.class_name)}</option>`).join('')}</select></label><button class="button secondary" ${available.length?'':'disabled'}>Thêm</button></form></div></section></div>
-      <div><section class="panel" id="face-registration"><div class="panel-heading"><h2>Đăng ký khuôn mặt</h2><span class="badge">ArcFace · RetinaFace</span></div><div class="panel-body"><p class="muted">Ảnh rõ mặt, chỉ có một người. JPEG, PNG hoặc WebP, tối đa 4 MB và 4096 px mỗi cạnh. Ảnh chỉ dùng để xử lý, không được lưu.</p>
-      <form id="face-form"><div class="upload-zone"><label class="field">Tải ảnh từ máy<input id="face-file" type="file" accept="image/jpeg,image/png,image/webp"></label><div class="camera-controls"><button type="button" class="button secondary" id="open-enroll-camera">◎ Bật camera</button><button type="button" class="button secondary" id="capture-enroll" disabled>Chụp ảnh</button><button type="button" class="button secondary" id="stop-enroll-camera" disabled>Tắt camera</button></div><video id="enroll-video" autoplay muted playsinline class="enrollment-media" hidden></video><img id="enroll-preview" class="enrollment-media" alt="Ảnh được chọn để đăng ký" hidden></div>
-      <label class="check-label"><input type="checkbox" id="face-confirm" required>Tôi xác nhận ảnh thuộc ${esc(s.student_code+' · '+s.full_name)}. AI chỉ kiểm tra và trích xuất khuôn mặt, không tự xác minh chủ thể.</label><button class="button primary" type="submit">Lưu đăng ký khuôn mặt</button><p class="muted" id="enrollment-progress" aria-live="polite">Hãy tắt camera nhận diện ở các tab khác trước khi đăng ký.</p></form></div></section>
+      <div><section class="panel" id="face-registration"><div class="panel-heading"><h2>Đăng ký khuôn mặt bằng AI</h2><span class="badge">Camera trực tiếp · ArcFace</span></div><div class="panel-body"><p class="muted">AI tự thu dữ liệu khi sinh viên quay đầu qua 5 tư thế. Không chụp hay tải ảnh; chỉ lưu embedding. ${s.face_count?'Đăng ký lại sẽ thay dữ liệu camera cũ sau khi bạn xác nhận; vector gốc từ dataset được giữ.':'Hồ sơ này chưa có dữ liệu khuôn mặt.'}</p><a class="button primary" href="/students/${s.id}/face">◎ ${s.face_count?'Đăng ký lại khuôn mặt':'Đăng ký khuôn mặt bằng AI'}</a></div></section>
       <section class="panel"><div class="panel-heading"><h2>Liên kết dữ liệu khuôn mặt cũ</h2></div><div class="panel-body">${s.legacy_label?`<p class="muted">Đã liên kết thủ công với <strong>${esc(s.legacy_label)}</strong>. Các vector gốc vẫn được giữ nguyên.</p>`:`<p class="muted">Chọn tên trong dataset tương ứng với hồ sơ này. Không tự gán mã sinh viên hay suy đoán từ similarity.</p><form id="mapping-form"><label class="field">Tên trong dataset<select id="legacy-select" required><option value="">Chọn tên tương ứng…</option>${legacy.items.filter(x=>!x.student_id).map(x=>`<option value="${esc(x.dataset_label)}">${esc(x.dataset_label)} · ${x.embedding_count} vector</option>`).join('')}</select></label><label class="check-label"><input id="mapping-confirm" type="checkbox" required>Tôi đã đối chiếu và xác nhận đúng sinh viên.</label><button class="button secondary">Liên kết dữ liệu cũ</button></form>`}</div></section>
-      <section class="panel"><div class="panel-heading"><h2>Dữ liệu đã đăng ký <span class="count">${s.faces.length}</span></h2></div><div class="panel-body">${s.faces.length?s.faces.map(f=>`<div class="list-item"><span class="muted">${f.embedding_reference?'Liên kết vector gốc':'Ảnh đăng ký mới'} #${f.id}</span><span class="badge">${esc(new Date(f.created_at).toLocaleDateString('vi-VN'))}</span></div>`).join(''):'<p class="muted">Chưa có dữ liệu khuôn mặt cho hồ sơ này.</p>'}</div></section></div></div>`;
+      <section class="panel"><div class="panel-heading"><h2>Dữ liệu đã đăng ký <span class="count">${s.faces.length}</span></h2></div><div class="panel-body">${s.faces.length?s.faces.map(f=>`<div class="list-item"><span class="muted">${f.embedding_reference?'Liên kết vector gốc':f.pose_label?'Camera AI · '+esc(poseNames[f.pose_label]||f.pose_label):'Ảnh đăng ký (cũ)'} #${f.id}</span><span class="badge">${esc(new Date(f.created_at).toLocaleDateString('vi-VN'))}</span></div>`).join(''):'<p class="muted">Chưa có dữ liệu khuôn mặt cho hồ sơ này.</p>'}</div></section></div></div>`;
     $('student-class-form').addEventListener('submit',e=>mutateForm(e,async()=>{await send(`/api/classes/${$('class-select').value}/students`,'POST',{student_id:identity});await studentDetail();notice('Đã phân sinh viên vào lớp.');}));
     $('mapping-form')?.addEventListener('submit',e=>mutateForm(e,async()=>{const result=await send(`/api/students/${identity}/legacy-mapping`,'POST',{dataset_label:$('legacy-select').value,confirmed:$('mapping-confirm').checked});await studentDetail();notice(result.gallery_updated?'Đã liên kết và cập nhật gallery.':'Đã lưu liên kết; gallery sẽ cập nhật khi AI sẵn sàng hoặc xử lý khung tiếp theo.');}));
-    bindEnrollment();
-  }
-  function releasePreview(){if(previewUrl){URL.revokeObjectURL(previewUrl);previewUrl=null;}}
-  function stopMedia(){mediaGeneration++;media?.getTracks().forEach(t=>t.stop());media=null;const v=$('enroll-video');if(v){v.srcObject=null;v.hidden=true;}$('capture-enroll')?.setAttribute('disabled','');$('stop-enroll-camera')?.setAttribute('disabled','');}
-  function chooseImage(blob){pendingImage=blob;releasePreview();previewUrl=URL.createObjectURL(blob);$('enroll-preview').src=previewUrl;$('enroll-preview').hidden=false;$('face-confirm').checked=false;}
-  function bindEnrollment(){
-    $('face-file').addEventListener('change',()=>{const file=$('face-file').files[0];if(file){stopMedia();chooseImage(file);}else{pendingImage=null;releasePreview();$('enroll-preview').hidden=true;}});
-    $('open-enroll-camera').addEventListener('click',async()=>{const button=$('open-enroll-camera');button.disabled=true;stopMedia();const generation=mediaGeneration;$('stop-enroll-camera').disabled=false;try{const acquired=await navigator.mediaDevices.getUserMedia({video:{width:{ideal:640},height:{ideal:480}},audio:false});if(generation!==mediaGeneration){acquired.getTracks().forEach(t=>t.stop());return;}media=acquired;const video=$('enroll-video');video.srcObject=media;video.hidden=false;await video.play();if(generation!==mediaGeneration)return;$('capture-enroll').disabled=false;}catch(e){stopMedia();notice(e.name==='NotAllowedError'?'Quyền camera bị từ chối. Hãy cấp quyền hoặc tải ảnh lên.':'Không mở được camera. Kiểm tra thiết bị và các ứng dụng đang sử dụng.',true);}finally{button.disabled=false;}});
-    $('stop-enroll-camera').addEventListener('click',stopMedia);
-    $('capture-enroll').addEventListener('click',()=>{const v=$('enroll-video');if(!v.videoWidth)return;const canvas=document.createElement('canvas');canvas.width=v.videoWidth;canvas.height=v.videoHeight;canvas.getContext('2d').drawImage(v,0,0);canvas.toBlob(blob=>{if(blob){chooseImage(blob);$('face-file').value='';stopMedia();}},'image/jpeg',.95);});
-    $('face-form').addEventListener('submit',e=>mutateForm(e,async()=>{
-      if(!pendingImage)throw new Error('Hãy chọn ảnh hoặc chụp một ảnh trước khi lưu.');
-      if(pendingImage.size>4*1024*1024)throw new Error('Ảnh vượt quá 4 MB. Hãy chọn ảnh nhỏ hơn.');
-      stopMedia();const form=new FormData();form.append('image',pendingImage,'registration.jpg');form.append('confirmed',$('face-confirm').checked?'true':'false');
-      $('enrollment-progress').textContent='AI đang kiểm tra khuôn mặt và tạo embedding. Có thể mất vài chục giây; không gửi lại khi đang xử lý.';
-      try{const result=await api(`/api/students/${identity}/faces`,{method:'POST',body:form});await studentDetail();notice(result.message+(result.gallery_updated?'':' Gallery sẽ cập nhật khi AI sẵn sàng.'));}catch(e){$('enrollment-progress').textContent='Chưa xác nhận lưu thành công. '+e.message;throw e;}
-    }));
   }
   async function mutateForm(event,task){event.preventDefault();const buttons=[...event.currentTarget.querySelectorAll('button')];buttons.forEach(b=>b.disabled=true);try{await task();}catch(e){notice(e.message,true);}finally{buttons.forEach(b=>b.disabled=false);}}
   async function openEditor(kind,id=null){
@@ -113,7 +94,12 @@
     }catch(error){notice(error.message,true);}finally{b.disabled=false;}
   });
   function showError(e){notice(e.message,true);}
-  async function render(){if(section==='overview')await overview();else if(identity)await(section==='students'?studentDetail():classDetail());else await collection($('search-query')?.value||'');}
-  window.addEventListener('pagehide',()=>{stopMedia();releasePreview();});
+  async function enrollment(){
+    const isNew=path[1]==='new';
+    const [student,classes]=await Promise.all([isNew?null:api(`/api/students/${identity}`),isNew?api('/api/classes'):{items:[]}]);
+    $('breadcrumb').textContent=isNew?'Thêm sinh viên':'Đăng ký lại khuôn mặt';
+    window.FaceEnrollment.mount(main,{api,send,notice,esc,token:cfg.csrfToken,mode:isNew?'new':'reenroll',student,classes:classes.items});
+  }
+  async function render(){if(enrollView)return enrollment();if(section==='overview')await overview();else if(identity)await(section==='students'?studentDetail():classDetail());else await collection($('search-query')?.value||'');}
   render().catch(e=>{main.innerHTML=empty('Không tải được dữ liệu',e.message,'<button class="button secondary" id="retry-load">Thử lại</button>');$('retry-load').addEventListener('click',()=>location.reload());});
 })();

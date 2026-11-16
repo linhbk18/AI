@@ -75,6 +75,12 @@ class ManagementStore:
             if 'student_code_is_temporary' not in {r['name'] for r in db.execute('PRAGMA table_info(students)')}:
                 db.execute('ALTER TABLE students ADD COLUMN student_code_is_temporary INTEGER NOT NULL DEFAULT 0 CHECK(student_code_is_temporary IN (0,1))')
             db.execute("UPDATE management_meta SET value=2 WHERE key='schema_version' AND value<2")
+            # Additive migration for camera enrollment: pose label + enrollment batch.
+            face_columns={r['name'] for r in db.execute('PRAGMA table_info(face_embeddings)')}
+            for column,ddl in (('pose_label','TEXT'),('enrollment_id','TEXT'),('sample_quality','REAL')):
+                if column not in face_columns: db.execute(f'ALTER TABLE face_embeddings ADD COLUMN {column} {ddl}')
+            db.execute('CREATE INDEX IF NOT EXISTS ix_face_enrollment ON face_embeddings(enrollment_id)')
+            db.execute("UPDATE management_meta SET value=3 WHERE key='schema_version' AND value<3")
 
     @staticmethod
     def bump(db):
@@ -115,7 +121,7 @@ class ManagementStore:
         else:
             with self.connection() as db:
                 r['legacy_label']=(db.execute('SELECT dataset_label FROM legacy_mappings WHERE student_id=?',(identity,)).fetchone() or [None])[0]
-                r['faces']=[dict(f) for f in db.execute('SELECT id,embedding_reference,created_at FROM face_embeddings WHERE student_id=? ORDER BY id DESC',(identity,))]
+                r['faces']=[dict(f) for f in db.execute('SELECT id,embedding_reference,created_at,pose_label FROM face_embeddings WHERE student_id=? ORDER BY id DESC',(identity,))]
         return r
 
     def save(self,kind,data,identity=None):
@@ -206,10 +212,115 @@ class ManagementStore:
     def gallery_snapshot(self):
         with self.connection() as db:
             db.execute('BEGIN')
-            revision=db.execute("SELECT value FROM management_meta WHERE key='gallery_revision'").fetchone()[0]
-            names={r['id']:f"{r['student_code']} · {r['full_name']}" for r in db.execute('SELECT * FROM students WHERE deleted_at IS NULL')}
-            mappings={r['dataset_label']:names[r['student_id']] for r in db.execute('SELECT * FROM legacy_mappings') if r['student_id'] in names}
-            records=[dict(r,student_id=mappings.get(r['student_id'],r['student_id'])) for r in self.legacy]
-            for r in db.execute('SELECT * FROM face_embeddings WHERE embedding_json IS NOT NULL'):
-                if r['student_id'] in names: records.append(dict(student_id=names[r['student_id']],embedding=json.loads(r['embedding_json']),source=f"sqlite/face_embeddings/{r['id']}"))
-            return records,revision
+            return self._snapshot(db)
+
+    def _snapshot(self,db):
+        revision=db.execute("SELECT value FROM management_meta WHERE key='gallery_revision'").fetchone()[0]
+        names={r['id']:f"{r['student_code']} · {r['full_name']}" for r in db.execute('SELECT * FROM students WHERE deleted_at IS NULL')}
+        mappings={r['dataset_label']:names[r['student_id']] for r in db.execute('SELECT * FROM legacy_mappings') if r['student_id'] in names}
+        records=[dict(r,student_id=mappings.get(r['student_id'],r['student_id'])) for r in self.legacy]
+        for r in db.execute('SELECT * FROM face_embeddings WHERE embedding_json IS NOT NULL'):
+            if r['student_id'] in names: records.append(dict(student_id=names[r['student_id']],embedding=json.loads(r['embedding_json']),source=f"sqlite/face_embeddings/{r['id']}"))
+        return records,revision
+
+    # ------------------------------------------------------------ camera enrollment
+    def gallery_label(self,student_id):
+        """Label the matcher uses for this student (same rule as _snapshot)."""
+        with self.connection() as db:
+            s=self.require(db,'students',student_id)
+        return f"{s['student_code']} · {s['full_name']}"
+
+    def code_status(self,code):
+        code=text(code,'Mã sinh viên',64).upper()
+        with self.connection() as db:
+            row=db.execute('SELECT id,deleted_at FROM students WHERE student_code=?',(code,)).fetchone()
+        if row is None: return dict(student_code=code,available=True)
+        return dict(student_code=code,available=False,archived=row['deleted_at'] is not None,
+            message='Mã sinh viên đã tồn tại'+(' (hồ sơ đã lưu trữ)' if row['deleted_at'] else '')+'. Dùng chức năng "Đăng ký lại khuôn mặt" cho sinh viên đã có.')
+
+    def validate_new_student(self,data,class_id=None):
+        if not isinstance(data,dict): raise DomainError('Nội dung phải là JSON object.')
+        fields=dict(student_code=text(data.get('student_code'),'Mã sinh viên',64).upper(),full_name=text(data.get('full_name'),'Họ tên'))
+        status=self.code_status(fields['student_code'])
+        if not status['available']: raise DomainError(status['message'],409)
+        if class_id is not None:
+            if isinstance(class_id,bool) or not isinstance(class_id,int) or class_id<=0: raise DomainError('Lớp học không hợp lệ.')
+            with self.connection() as db: self.require(db,'classes',class_id)
+        return fields
+
+    def backup(self,directory,keep=20):
+        """Consistent online copy of the SQLite file before a gallery write."""
+        directory=Path(directory);directory.mkdir(parents=True,exist_ok=True)
+        target=directory/f"management-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}.sqlite3"
+        source=sqlite3.connect(self.path);dest=sqlite3.connect(target)
+        try: source.backup(dest)
+        finally: dest.close();source.close()
+        for old in sorted(directory.glob('management-*.sqlite3'))[:-keep] if keep else []:
+            old.unlink(missing_ok=True)
+        return target
+
+    @staticmethod
+    def _insert_samples(db,student_id,samples,pipeline,enrollment_id,stamp):
+        ids=[]
+        for s in samples:
+            vector=np.asarray(s['embedding'],dtype=float)
+            if vector.shape!=(512,) or not np.isfinite(vector).all() or np.linalg.norm(vector)==0: raise DomainError('Embedding ArcFace không hợp lệ.',422)
+            ids.append(db.execute('INSERT INTO face_embeddings(student_id,embedding_json,pipeline_json,created_at,attribution_confirmed_at,pose_label,enrollment_id,sample_quality) VALUES (?,?,?,?,?,?,?,?)',
+                (student_id,json.dumps(vector.tolist(),allow_nan=False),json.dumps(dict(pipeline,pose=s['pose'])),stamp,stamp,s['pose'],enrollment_id,s.get('quality'))).lastrowid)
+        return ids
+
+    def enroll_new_student(self,data,class_id,samples,pipeline,enrollment_id,validate=None):
+        """Student + class link + all camera vectors + revision bump in ONE transaction.
+
+        validate(records) runs on the post-change gallery before COMMIT; any
+        exception rolls everything back so nothing half-saved is left behind.
+        """
+        if not samples: raise DomainError('Chưa có dữ liệu khuôn mặt để lưu.')
+        fields=self.validate_new_student(data,class_id)
+        stamp=now()
+        with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            student_id=db.execute('INSERT INTO students(student_code,full_name,created_at,updated_at) VALUES (?,?,?,?)',(fields['student_code'],fields['full_name'],stamp,stamp)).lastrowid
+            if class_id is not None:
+                self.require(db,'classes',class_id)
+                db.execute('INSERT INTO class_students(class_id,student_id) VALUES (?,?)',(class_id,student_id))
+            ids=self._insert_samples(db,student_id,samples,pipeline,enrollment_id,stamp)
+            self.bump(db)
+            records,revision=self._snapshot(db)
+            if validate: validate(records)
+        return dict(student_id=student_id,embedding_ids=ids,revision=revision,enrollment_id=enrollment_id,mode='new',replaced=[])
+
+    def replace_camera_embeddings(self,student_id,samples,pipeline,enrollment_id,validate=None):
+        """Swap only this student's SQLite vectors; legacy (original 92) references stay.
+
+        Old rows are deleted in the same transaction that inserts the new ones,
+        so the previous data remains until the new data is committed.
+        """
+        if not samples: raise DomainError('Chưa có dữ liệu khuôn mặt để lưu.')
+        stamp=now()
+        with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self.require(db,'students',student_id)
+            old=[dict(r) for r in db.execute('SELECT * FROM face_embeddings WHERE student_id=? AND embedding_json IS NOT NULL',(student_id,))]
+            db.execute('DELETE FROM face_embeddings WHERE student_id=? AND embedding_json IS NOT NULL',(student_id,))
+            ids=self._insert_samples(db,student_id,samples,pipeline,enrollment_id,stamp)
+            self.bump(db)
+            records,revision=self._snapshot(db)
+            if validate: validate(records)
+        return dict(student_id=student_id,embedding_ids=ids,revision=revision,enrollment_id=enrollment_id,mode='reenroll',replaced=old)
+
+    def revert_enrollment(self,receipt):
+        """Compensating transaction if the runtime gallery could not load the commit."""
+        with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            db.execute('DELETE FROM face_embeddings WHERE enrollment_id=?',(receipt['enrollment_id'],))
+            if receipt['mode']=='new':
+                db.execute('DELETE FROM class_students WHERE student_id=?',(receipt['student_id'],))
+                db.execute('DELETE FROM students WHERE id=?',(receipt['student_id'],))
+            for r in receipt['replaced']:
+                db.execute(f"INSERT INTO face_embeddings({','.join(r)}) VALUES ({','.join('?' for _ in r)})",tuple(r.values()))
+            self.bump(db)
+
+    def camera_samples(self,student_id):
+        with self.connection() as db:
+            return [dict(r) for r in db.execute('SELECT pose_label,count(*) AS n FROM face_embeddings WHERE student_id=? AND enrollment_id IS NOT NULL GROUP BY pose_label',(student_id,))]
