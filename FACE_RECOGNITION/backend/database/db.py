@@ -64,6 +64,7 @@ class ManagementStore:
                 id INTEGER PRIMARY KEY,student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE RESTRICT,
                 embedding_reference TEXT UNIQUE,embedding_json TEXT,pipeline_json TEXT NOT NULL,
                 image_sha256 TEXT UNIQUE,created_at TEXT NOT NULL,attribution_confirmed_at TEXT NOT NULL,
+                pose_label TEXT,enrollment_id TEXT,sample_quality REAL,
                 CHECK ((embedding_reference IS NULL) != (embedding_json IS NULL)));
             CREATE TABLE IF NOT EXISTS legacy_mappings (
                 dataset_label TEXT PRIMARY KEY,student_id INTEGER NOT NULL UNIQUE REFERENCES students(id) ON DELETE RESTRICT);
@@ -76,6 +77,13 @@ class ManagementStore:
             # Additive migration: existing codes/names/references are never replaced.
             if 'student_code_is_temporary' not in {r['name'] for r in db.execute('PRAGMA table_info(students)')}:
                 db.execute('ALTER TABLE students ADD COLUMN student_code_is_temporary INTEGER NOT NULL DEFAULT 0 CHECK(student_code_is_temporary IN (0,1))')
+            face_cols = {r['name'] for r in db.execute('PRAGMA table_info(face_embeddings)')}
+            if 'pose_label' not in face_cols:
+                db.execute('ALTER TABLE face_embeddings ADD COLUMN pose_label TEXT')
+            if 'enrollment_id' not in face_cols:
+                db.execute('ALTER TABLE face_embeddings ADD COLUMN enrollment_id TEXT')
+            if 'sample_quality' not in face_cols:
+                db.execute('ALTER TABLE face_embeddings ADD COLUMN sample_quality REAL')
             db.execute("UPDATE management_meta SET value=2 WHERE key='schema_version' AND value<2")
             self._gallery_revision_cache=db.execute("SELECT value FROM management_meta WHERE key='gallery_revision'").fetchone()[0]
 

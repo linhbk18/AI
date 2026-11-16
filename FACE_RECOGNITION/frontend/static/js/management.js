@@ -25,7 +25,7 @@
   const badge=n=>`<span class="badge ${n?'success':''}">${n?`Đã đăng ký · ${n} vector`:'Chưa đăng ký'}</span>`;
   const studentCode=s=>`${esc(s.student_code)}${s.student_code_is_temporary?' <span class="badge">Mã tạm · demo</span>':''}`;
   const heading=(title,subtitle,action='')=>`<div class="page-heading"><div><p class="eyebrow">QUẢN LÝ ĐÀO TẠO</p><h1>${esc(title)}</h1><p class="subtitle">${esc(subtitle)}</p></div>${action}</div>`;
-  const addButton=kind=>kind==='students'?'<a class="button primary" href="/students/new">＋ Thêm sinh viên</a>':`<button class="button primary" data-action="new" data-kind="${kind}">＋ Thêm lớp học</button>`;
+  const addButton=kind=>`<button type="button" class="button primary" data-action="new" data-kind="${kind}" id="${kind==='students'?'btn-add-student':'btn-add-class'}">＋ ${kind==='students'?'Thêm sinh viên':'Thêm lớp học'}</button>`;
   function studentRows(students,removable=false){return students.map(s=>`<tr><td class="code">${studentCode(s)}</td><td><a href="/students/${s.id}" class="name-cell"><span class="avatar">${esc(s.full_name.trim().split(/\s+/).map(x=>x[0]).slice(-2).join(''))}</span><span class="entity-name">${esc(s.full_name)}</span></a></td><td>${badge(s.face_count)}</td><td>${esc(s.classes.map(c=>c.class_code).join(', ')||'Chưa phân lớp')}</td><td><div class="actions">${removable?`<button class="text-button danger" data-action="remove-member" data-id="${s.id}">Gỡ khỏi lớp</button>`:`<a class="text-button" href="/students/${s.id}">Chi tiết</a><button class="text-button" data-action="edit" data-kind="students" data-id="${s.id}">Sửa</button><button class="text-button danger" data-action="delete" data-kind="students" data-id="${s.id}">Xóa</button>`}</div></td></tr>`).join('');}
   function studentTable(rows,remove=false){return `<div class="table-scroll"><table><thead><tr><th>MÃ SINH VIÊN</th><th>HỌ VÀ TÊN</th><th>KHUÔN MẶT</th><th>LỚP THAM GIA</th><th></th></tr></thead><tbody>${studentRows(rows,remove)}</tbody></table></div>`;}
   async function overview(){
@@ -339,7 +339,9 @@
     $('editor-error').textContent='';$('editor').showModal();
   }
   main.addEventListener('click',async e=>{
-    const b=e.target.closest('[data-action]');if(!b)return;const action=b.dataset.action,id=Number(b.dataset.id),kind=b.dataset.kind;
+    const b=e.target.closest('[data-action]');if(!b)return;
+    e.preventDefault();
+    const action=b.dataset.action,id=Number(b.dataset.id),kind=b.dataset.kind;
     if(b.disabled)return;b.disabled=true;
     try{
       if(action==='new'||action==='edit'){if(kind==='students'&&action==='new')await openEnrollmentDialog();else await openEditor(kind,action==='edit'?id:null);return;}
@@ -353,7 +355,18 @@
     }catch(error){notice(error.message,true);}finally{b.disabled=false;}
   });
   function showError(e){notice(e.message,true);}
-  async function render(){if(section==='overview')await overview();else if(identity)await(section==='students'?studentDetail():classDetail());else await collection($('search-query')?.value||'');}
+  async function render(){
+    if(section==='overview')await overview();
+    else if(section==='students'&&path[1]==='new'){
+      window.history.replaceState({},'','/students');
+      await collection();
+      await openEnrollmentDialog();
+    }
+    else if(identity&&!isNaN(identity))await(section==='students'?studentDetail():classDetail());
+    else await collection($('search-query')?.value||'');
+  }
+  window.openEnrollmentDialog=openEnrollmentDialog;
+  window.openAddStudentModal=()=>openEnrollmentDialog();
   window.addEventListener('pagehide',()=>{stopMedia();if(enrollmentSession)fetch('/api/enrollment/cancel',{method:'POST',keepalive:true,headers:{'Content-Type':'application/json','X-Camera-Token':cfg.csrfToken},body:JSON.stringify({session:enrollmentSession})}).catch(()=>{});});
   render().catch(e=>{main.innerHTML=empty('Không tải được dữ liệu',e.message,'<button class="button secondary" id="retry-load">Thử lại</button>');$('retry-load').addEventListener('click',()=>location.reload());});
 })();
