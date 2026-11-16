@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Quản lý đào tạo · Sinh viên</title>
+  <link rel="stylesheet" href="{{ url_for('static',filename='css/management.css') }}">
+  <script id="management-config" type="application/json">{{ {'csrfToken': csrf_token}|tojson }}</script>
+  <script defer src="{{ url_for('static',filename='js/management.js') }}"></script>
+  <link rel="stylesheet" href="{{ url_for('static',filename='css/design-system.css') }}">
+</head>
+<body>
+  {% include '_sidebar.html' %}
+  <div class="app-content">
+    {% include '_header.html' %}
+    <span id="breadcrumb" hidden></span><main id="main"><div class="loading">Đang tải dữ liệu…</div></main>
+    <footer class="page-footer">Sinh viên · Nền tảng quản lý lớp học <span>Xác nhận điểm danh bởi con người</span></footer>
+  </div>
+  <div id="notification" role="status" aria-live="polite" hidden></div>
+  <dialog id="editor"><form id="editor-form"><div class="dialog-heading"><h2 id="editor-title"></h2><button type="button" id="close-editor" class="icon-button" aria-label="Đóng">×</button></div><div id="editor-fields"></div><p id="editor-error" class="form-error" role="alert"></p><div class="form-actions"><button type="button" id="cancel-editor" class="button secondary">Hủy</button><button type="submit" class="button primary">Lưu thông tin</button></div></form></dialog>
+</body>
+</html>

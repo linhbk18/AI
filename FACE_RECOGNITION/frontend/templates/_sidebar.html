@@ -1,0 +1,11 @@
+<aside class="sidebar">
+  <a class="brand" href="/overview"><span class="brand-mark">AI</span><span>STUDENT<small>ATTENDANCE</small></span></a>
+  <div class="nav-caption">KHÔNG GIAN QUẢN LÝ</div>
+  <nav aria-label="Điều hướng chính">
+    {% for href,key,icon,label in [('/overview','overview','◫','Tổng quan'),('/classes','classes','▤','Quản lý lớp học'),('/students','students','♙','Quản lý sinh viên'),('/attendance','attendance','◎','Điểm danh AI'),('/history','history','◷','Lịch sử điểm danh'),('/reports','reports','▥','Báo cáo chuyên cần')] %}
+    <a href="{{ href }}" data-nav="{{ key }}" {% if request.path.startswith(href) %}class="active" aria-current="page"{% endif %}><span aria-hidden="true">{{ icon }}</span>{{ label }}</a>
+    {% endfor %}
+  </nav>
+  <a class="camera-lab-link" href="/">Camera kiểm thử ↗</a>
+  <div class="sidebar-footer">LOCALHOST · 5055<small>Không có đăng nhập · Không tự xác nhận AI</small></div>
+</aside>

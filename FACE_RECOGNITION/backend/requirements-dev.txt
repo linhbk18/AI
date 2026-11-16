@@ -1,0 +1,2 @@
+# Optional browser QA using an already-installed Chrome/Edge, no browser download.
+playwright==1.65.2

@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "default_profile": "retinaface_reuse",
+  "enrollment_configuration": "outputs/face_config.json",
+  "gallery": "outputs/face_embeddings.json",
+  "identity_confirmation_enabled": false,
+  "profiles": {
+    "retinaface_reuse": {
+      "label": "RetinaFace · tương thích bộ đăng ký",
+      "experimental": false,
+      "detector": "retinaface",
+      "alignment": "DeepFace 0.0.93 eye rotation and facial-area projection",
+      "embedding": "preloaded ArcFace.forward, normalization=base",
+      "requires_equivalence_check": true
+    },
+    "retinaface_native_experimental": {
+      "label": "Thử nghiệm · RetinaFace không phóng ảnh",
+      "experimental": true,
+      "detector": "retinaface",
+      "detector_allow_upscaling": false,
+      "detection_padding": false,
+      "alignment_padding": true,
+      "identity_thresholds_enabled": false,
+      "warning": "RetinaFace weights unchanged, detector input preprocessing changed; fresh validation required."
+    },
+    "yunet_experimental": {
+      "label": "Nhanh thử nghiệm · YuNet 640 + ArcFace",
+      "experimental": true,
+      "available": false,
+      "quality_note": "640x480 probe: 23/25 correct, two missed faces. Experimental only; not a reliable identity policy.",
+      "detector": "yunet",
+      "detector_input_dimension": 640,
+      "detector_confidence": 0.9,
+      "identity_thresholds_enabled": false,
+      "warning": "Changed detector/landmarks; use only with separately reported validation. No inherited rejection policy."
+    },
+    "yunet_recall_experimental": {
+      "label": "Nhanh thử nghiệm · YuNet tăng độ phủ",
+      "experimental": true,
+      "detector": "yunet",
+      "detector_input_dimension": 640,
+      "detector_confidence": 0.75,
+      "quality_note": "640x480: 23/25 identities correct; 25 one-box outputs. Two wrong candidates; not a verified identity policy.",
+      "identity_thresholds_enabled": false,
+      "warning": "Detection confidence experiment only, NOT a cosine identity threshold. Requires fresh validation."
+    },
+    "yunet_960_experimental": {
+      "label": "Thử nghiệm · YuNet 960 + ArcFace",
+      "experimental": true,
+      "available": false,
+      "quality_note": "Rejected from camera UI: 21/25 at 640x480; worse than YuNet 640 and RetinaFace.",
+      "detector": "yunet",
+      "detector_input_dimension": 960,
+      "detector_confidence": 0.9,
+      "identity_thresholds_enabled": false,
+      "warning": "Changed detector/input scaling; experimental, not a verified identity decision."
+    },
+    "retinaface_scaled_experimental": {
+      "label": "RetinaFace detector 480 / ArcFace original crop - experimental",
+      "experimental": true,
+      "detector": "retinaface",
+      "detector_max_dimension": 480,
+      "detector_allow_upscaling": false,
+      "identity_thresholds_enabled": false,
+      "warning": "Detector-only resize; landmarks mapped to original full-resolution alignment crop. Fresh validation required."
+    }
+  }
+}

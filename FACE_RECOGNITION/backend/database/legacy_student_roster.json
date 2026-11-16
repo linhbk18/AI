@@ -1,0 +1,7 @@
+[
+  {"dataset_label":"Bùi Kiều Linh","display_name":"Bùi Kiều Linh","temporary_code":"DEMO-SV001","expected_embeddings":20},
+  {"dataset_label":"Hà Vi","display_name":"Hà Vi","temporary_code":"DEMO-SV002","expected_embeddings":17},
+  {"dataset_label":"Nhi","display_name":"Nhi","temporary_code":"DEMO-SV003","expected_embeddings":20},
+  {"dataset_label":"PThao","display_name":"PThao","temporary_code":"DEMO-SV004","expected_embeddings":16},
+  {"dataset_label":"Thu Thảo","display_name":"Thu Thảo","temporary_code":"DEMO-SV005","expected_embeddings":19}
+]

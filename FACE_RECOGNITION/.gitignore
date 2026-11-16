@@ -1,0 +1,52 @@
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python caches and build artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Temporary files and local secrets
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db
+
+# Biometric data, embeddings, and generated results
+/DATASET/
+/outputs/
+*.npy
+*.npz
+*.pkl
+*.pickle
+*.h5
+*.hdf5
+*.onnx
+*.pt
+*.pth
+
+
+# Local databases and face embeddings at any depth
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+**/*embeddings*.json
+**/.deepface/
+

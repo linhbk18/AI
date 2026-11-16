@@ -1,0 +1,14 @@
+<section id="media-panel" class="card" hidden>
+  <div class="card-heading"><h2 id="media-title">Nhận diện từ tệp</h2><span id="media-source-note" class="micro-label">ĐỀ XUẤT · CHƯA ĐIỂM DANH</span></div>
+  <div class="media-body">
+    <div class="media-actions"><button id="open-source-camera" class="button button-primary" type="button" hidden>Mở camera chụp ảnh</button><button id="capture-source" class="button button-primary" type="button" hidden disabled>Chụp ảnh</button><label id="media-file-label" class="media-file-label">Chọn tệp<input id="media-file" type="file" accept="image/jpeg,image/png,image/webp"></label><button id="analyze-media" class="button button-primary" type="button" disabled>Phân tích</button><button id="cancel-media" class="button button-secondary" type="button" disabled>Hủy phân tích</button></div>
+    <p id="media-limits" class="small-copy">Ảnh tối đa 8 MB, 20 megapixel. Video tối đa 64 MB, 120 giây, 1080p; phân tích mỗi 2 giây.</p>
+    <p id="media-file-info" class="small-copy"></p>
+    <p id="media-status" class="message" role="status" aria-live="polite">Chọn lớp và bắt đầu buổi điểm danh.</p>
+    <progress id="media-progress" max="1" value="0" hidden aria-label="Tiến độ phân tích tệp"></progress>
+    <video id="media-video" playsinline muted controls hidden></video>
+    <canvas id="media-canvas" hidden aria-label="Ảnh hoặc frame đã phân tích với ứng viên chưa xác nhận"></canvas>
+    <label id="media-frame-label" hidden>Khung đã phân tích<select id="media-frame"></select></label>
+    <div id="media-review" hidden><h3>Danh sách đề xuất</h3><p class="small-copy">Tên và điểm tương đồng chỉ là ứng viên AI. Hãy đối chiếu ảnh/video, chọn đúng sinh viên thực sự có mặt rồi xác nhận. Không tự ghi từ ảnh/video.</p><div id="media-students"></div><button id="confirm-media" class="button button-primary" type="button">Xác nhận danh sách đã duyệt</button></div>
+  </div>
+</section>

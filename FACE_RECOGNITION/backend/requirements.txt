@@ -1,0 +1,11 @@
+Flask
+# Compatible TensorFlow/Keras 2 stack for Python 3.10 on native Windows.
+deepface==0.0.93
+retina-face==0.0.17
+mtcnn==0.1.1
+tensorflow==2.15.1
+keras==2.15.0
+opencv-python==4.10.0.84
+numpy==1.26.4
+Pillow>=11,<13
+pillow-heif>=0.18,<1.9
