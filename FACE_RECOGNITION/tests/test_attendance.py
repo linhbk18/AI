@@ -142,11 +142,11 @@ class ClassGallery(unittest.TestCase):
             import numpy as np
             frame=np.zeros((100,100,3),dtype=np.uint8)
             one=engine.analyze(frame,allowed_student_ids=[rows[0]['student_id']])['faces'][0]
-            self.assertIsNone(one['top2']['candidate']);self.assertTrue(one['eligible_for_confirmation']);self.assertFalse(one['identity_confirmed'])
+            self.assertIsNotNone(one['top2']['candidate']);self.assertNotEqual(one['top1']['candidate'],one['top2']['candidate']);self.assertTrue(one['eligible_for_confirmation']);self.assertFalse(one['identity_confirmed'])
             outside=engine.analyze(frame,allowed_student_ids=[rows[1]['student_id']])['faces'][0]
             self.assertTrue(outside['outside_class']);self.assertFalse(outside['eligible_for_confirmation'])
             empty=engine.analyze(frame,allowed_student_ids=[])['faces'][0]
-            self.assertIsNone(empty['top1']['similarity']);self.assertIsNone(empty['top1']['student'])
+            self.assertEqual(empty['top1'],one['top1']);self.assertTrue(empty['outside_class']);self.assertFalse(empty['eligible_for_confirmation'])
 
 
 if __name__=='__main__':unittest.main()

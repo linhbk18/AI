@@ -108,7 +108,7 @@
   function boxes(ctx,faces,scale,ox=0,oy=0,names=false,width=10000){
     ctx.font="12px Segoe UI";ctx.lineWidth=2;
     for(const face of faces){const b=face.box;ctx.strokeStyle=getComputedStyle(document.documentElement).getPropertyValue(names?"--warning":"--primary").trim();ctx.strokeRect(ox+b.x*scale,oy+b.y*scale,b.w*scale,b.h*scale);
-      const label=names?"#"+face.face_id+" "+face.top1.candidate+" · "+score(face.top1.similarity,3)+" ?":"#"+face.face_id+" · khuôn mặt";
+      const label=names?(face.identity_confirmed?(face.outside_class?"Không thuộc lớp":face.top1.student?.full_name||"Không xác định"):"Không xác định"):"#"+face.face_id+" · khuôn mặt";
       const tw=Math.min(width,ctx.measureText(label).width+10),x=Math.max(0,Math.min(width-tw,ox+b.x*scale)),y=Math.max(0,oy+b.y*scale-23);
       ctx.fillStyle=getComputedStyle(document.documentElement).getPropertyValue("--navy").trim();ctx.fillRect(x,y,tw,21);ctx.fillStyle=getComputedStyle(document.documentElement).getPropertyValue("--white").trim();ctx.fillText(label,x+5,y+15,tw-8);
     }
@@ -119,12 +119,13 @@
     $("result-context").textContent=processed?"Ứng viên của ảnh đối chiếu chụp trước "+(age/1000).toFixed(1)+" giây; không phải danh tính trên video hiện tại.":"Ứng viên từ ảnh camera chụp trước "+(age/1000).toFixed(1)+" giây. Hãy đối chiếu trước khi xác nhận.";
     if(!faces.length){empty("RetinaFace không tìm thấy khuôn mặt trong ảnh đối chiếu.");return;}
     const cards=faces.map(face=>{
+      const display=window.RecognitionDisplay.describe(face);
       const card=document.createElement("article");card.className="candidate-item";
       const top=document.createElement("div");top.className="candidate-top";
-      for(const [text,cls] of [["#"+face.face_id,"face-number"],[face.top1.student?.full_name||face.top1.candidate,"candidate-name"],[score(face.top1.similarity),"candidate-score"]]){const span=document.createElement("span");span.className=cls;span.textContent=text;top.append(span);}
-      const label=document.createElement("div");label.className="candidate-label";label.textContent="Ứng viên chưa xác nhận";
-      const code=document.createElement("div");code.className="candidate-detail";code.textContent=face.top1.student?"Mã: "+face.top1.student.student_code+(face.top1.student.code_is_temporary?" · mã tạm demo":""):"Chưa có hồ sơ SQLite được ánh xạ";
-      const second=document.createElement("div");second.className="candidate-detail";second.textContent="Top-2: "+(face.top2.candidate||'Không có ứng viên thứ hai')+" · "+score(face.top2.similarity);
+      for(const [text,cls] of [["#"+face.face_id,"face-number"],[display.name,"candidate-name"],[score(face.top1.similarity),"candidate-score"]]){const span=document.createElement("span");span.className=cls;span.textContent=text;top.append(span);}
+      const label=document.createElement("div");label.className="candidate-label";label.textContent=display.verified?"Danh tính đã xác minh":"Gợi ý AI — chưa xác minh, không tự ghi điểm danh";
+      const code=document.createElement("div");code.className="candidate-detail";code.textContent=display.code?"Mã: "+face.top1.student.student_code+(face.top1.student.code_is_temporary?" · mã tạm demo":""):"Chưa có hồ sơ SQLite được ánh xạ";
+      const second=document.createElement("div");second.className="candidate-detail";second.textContent=display.verified?"Đã vượt kiểm tra xác minh.":"Đây là ứng viên gần nhất, chưa phải kết luận danh tính.";
       const margin=document.createElement("div");margin.className="candidate-detail";margin.textContent="Chênh lệch: "+score(face.margin);card.append(top,label,code,second,margin);return card;
     });$("candidate-list").replaceChildren(...cards);
   }
@@ -146,7 +147,7 @@
     if((!lastPreview||!tracks.tracks.length)&&now-attemptedAt<8000){scheduleIdentity(epoch);return;}
     identityPending=true;attemptedAt=now;
     // Do not clear a stable track's candidate when starting another request.
-    $("recognition-state").textContent="Đang nhận diện…";$("capture-state").textContent="ArcFace đang xử lý một ảnh; video và khung nhanh vẫn chạy.";
+    $("recognition-state").textContent="";$("capture-state").textContent="ArcFace đang xử lý một ảnh; video và khung nhanh vẫn chạy.";
     let delay=1200;
     try{
       const target=size.value.split("x").map(Number),captured=await capture(...target);if(epoch!==generation)return;
@@ -182,7 +183,7 @@
       window.dispatchEvent(new CustomEvent('camera:candidates',{detail:{faces:data.faces,sessionId:data.attendance_session_id??null}}));
       if(data.automatic_attendance?.session)window.dispatchEvent(new CustomEvent('attendance:auto',{detail:data.automatic_attendance.session}));
       if(data.automatic_attendance?.status)showAutomationStatus(data.automatic_attendance.status);
-      $("recognition-state").textContent=data.faces.length?"Có ứng viên · chưa xác nhận":"Không tìm thấy mặt";
+      $("recognition-state").textContent=data.faces.some(f=>f.identity_confirmed)?"Có danh tính đã xác minh":data.faces.length?"Có gợi ý AI · cần đối chiếu":"Không tìm thấy mặt";
       $("capture-state").textContent="Đã phân tích "+completed+" ảnh · "+data.profile;
       if(data.face_errors)message("Có khuôn mặt chưa xử lý được. Xem Terminal backend.","error");
       else if(!lastErrorAt)message(data.faces.length&&!tracks.lastApply.linked?"Khuôn mặt đã thay đổi hoặc kết quả đã cũ. Đang chờ nhận diện mới.":data.automatic_attendance?.enabled?(needsVerification?'Đang kiểm tra nhận diện nhất quán trên cùng khuôn mặt.':'Tự động đang bật. Kết quả đủ điều kiện sẽ được lưu Có mặt.'):'Đã cập nhật ứng viên AI. Tự động đang khóa; bạn có thể xác nhận thủ công trong danh sách lớp.',"info");
@@ -214,7 +215,7 @@
       }
     }
     if(shownAt){text("frame-age","Ảnh chụp trước "+((now-snapshotAt)/1000).toFixed(1)+"s");if(now-shownAt>3500)clearIdentity("Kết quả đã hết thời gian hiển thị. Chờ kết quả mới.");}
-    if(identityPending)$("recognition-state").textContent="Đang nhận diện · "+((now-attemptedAt)/1000).toFixed(1)+"s";
+    if(identityPending)$("recognition-state").textContent="";
     animation=requestAnimationFrame(animate);
   }
   function drawLiveTracks(ctx,items,width,height){
@@ -225,7 +226,7 @@
       const rect=window.SafeFaceTracks.project(t.box,video.videoWidth,video.videoHeight,width,height,mirror),{x:left,y:top,w,h}=rect;
       ctx.strokeStyle=theme.getPropertyValue('--primary').trim();ctx.strokeRect(left,top,w,h);
       const f=t.candidate,p=f?.top1?.student,confirmed=p&&attendanceState.sessionId===window.attendanceBridge?.getSessionId()&&attendanceState.records.some(r=>r.student_id===p.id&&r.attendance_status==='PRESENT');
-      const lines=p?[p.full_name,p.student_code+' · cosine '+score(f.top1.similarity),t.stale?'Ứng viên AI · kết quả cũ':confirmed?'Đã điểm danh':'Ứng viên AI – chưa xác nhận']:[];
+      const lines=t.unknown&&!t.stale?['Không xác định']:window.RecognitionDisplay.describe(f,t.stale,confirmed).lines;
       t.displayLines=lines;t.displayBox=rect;
       if(!lines.length)continue;
       const labelWidth=Math.min(width,Math.max(...lines.map(line=>ctx.measureText(line).width))+16),labelHeight=lines.length*19+8;
@@ -236,12 +237,12 @@
       t.displayBox=rect;
     }
     diagnostics.live_labels=items.map(t=>({trackId:t.id,lines:t.displayLines||[],box:t.displayBox,stale:!!t.stale}));
-    window.dispatchEvent(new CustomEvent('camera:tracks',{detail:{sessionId:window.attendanceBridge?.getSessionId()??null,studentIds:items.filter(t=>t.candidate&&!t.stale).map(t=>t.candidate.top1.student.id)}}));
+    window.dispatchEvent(new CustomEvent('camera:tracks',{detail:{sessionId:window.attendanceBridge?.getSessionId()??null,studentIds:items.filter(t=>t.candidate?.identity_confirmed&&!t.candidate.outside_class&&!t.stale&&t.candidate.top1?.student).map(t=>t.candidate.top1.student.id)}}));
   }
   window.addEventListener('attendance:state',e=>{attendanceState=e.detail;});
   function showAutomationStatus(status){
-    const note=document.querySelector('.policy-notice p');if(note)note.textContent=status.message;
-    const title=document.querySelector('.policy-notice strong');if(title)title.textContent=status.ready?'Kiểm tra xác minh tự động':'Tự động điểm danh đang khóa';
+    const note=document.querySelector('.policy-notice p');if(note)note.textContent=status.ready?'AI đang xác minh để tự ghi điểm danh.':'Bạn vẫn xem được gợi ý AI và xác nhận thủ công. Tự động ghi điểm danh chưa bật vì chưa có đánh giá độc lập đạt yêu cầu.';
+    const title=document.querySelector('.policy-notice strong');if(title)title.textContent=status.ready?'Chế độ điểm danh tự động':'Chế độ xác nhận thủ công';
     diagnostics.automatic_attendance=status;
     const panel=document.querySelector('.policy-notice');
     if(panel){let button=$('automatic-mode');if(!button){button=document.createElement('button');button.id='automatic-mode';button.type='button';button.className='button secondary';panel.append(button);button.onclick=async()=>{button.disabled=true;await stop('Đổi chế độ điểm danh. Hãy bật lại camera.');try{const r=await fetch('/api/attendance/automation-mode',{method:'POST',headers:{...token(),'Content-Type':'application/json'},body:JSON.stringify({enabled:!diagnostics.automatic_attendance.requested,profile:profile.value})});const d=await r.json();if(!r.ok)throw Error(d.error?.message||'Không đổi được chế độ.');showAutomationStatus(d);}catch(e){message(e.message,'error');await health();}};}button.textContent=status.requested?'Tắt điểm danh tự động':'Bật điểm danh tự động';button.disabled=!status.requested&&!status.can_enable;button.title=status.can_enable?'Chỉ ghi khi VERIFIED, track hợp lệ và thuộc lớp.':status.message;}

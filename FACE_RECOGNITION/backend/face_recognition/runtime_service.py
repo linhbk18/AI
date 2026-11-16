@@ -273,16 +273,13 @@ class RecognitionEngine:
                     global_match=match
                     outside=False
                     if allowed_student_ids is not None:
-                        member_labels={label for label,person in self._public_identities.items() if person['id'] in allowed_student_ids}
                         global_person=self._public_identities.get(match['best_candidate'])
                         outside=not global_person or global_person['id'] not in allowed_student_ids
-                        match=self.matcher.match(face['embedding'],member_labels)
-                        if match is None:match=dict(best_candidate='Không xác định',best_similarity=None,second_candidate=None,second_similarity=None,margin=None,decision='unconfirmed')
                     if PROFILES.get(profile,{}).get('experimental',False):
                         # Enrollment rejection thresholds cannot be inherited by a different detector.
                         match['decision']='unconfirmed'
                     verifier=getattr(self,'automatic_verifier',None)
-                    verified=bool(verifier and not outside and verifier.verify(global_match,self.matcher.signature,profile,self.matcher.policy))
+                    verified=bool(verifier and verifier.verify(global_match,self.matcher.signature,profile,self.matcher.policy))
                     # Explicit public whitelist: no embedding, gallery image or filesystem path.
                     public_faces.append(dict(face_id=len(public_faces) + 1,
                         box=dict(x=x, y=y, w=right-x, h=bottom-y),

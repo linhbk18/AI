@@ -76,6 +76,18 @@ class AutomaticAttendance:
                     not math.isfinite(target) or isinstance(bound,bool) or not math.isfinite(bound)
                     or not 0<=value<=bound<=target<=1):return False
             if report['known_samples']<=0 or report['unknown_samples']<=0:return False
+            # Fixed project criteria cannot be relaxed by report-supplied targets.
+            if report['known_wrong_identity_rate'] != 0:return False
+            if report['unknown_false_accept_rate'] > .01 or report['known_false_rejection_rate'] > .10:return False
+            if report['known_samples']+report['unknown_samples'] < 200:return False
+            samples=report.get('samples',[])
+            unknown_people={r['identity'] for r in samples if r.get('identity','').startswith('UNKNOWN:')}
+            if len(unknown_people) < 10 or report.get('holdout_webcam_frames',0) < 200:return False
+            temporal=report.get('temporal_evaluation',{})
+            if (temporal.get('required') != 5 or temporal.get('window') != 7 or
+                temporal.get('unknown_attendance_false_accepts') != 0 or
+                temporal.get('known_attendance_wrong_identity') != 0 or
+                temporal.get('known_trials',0) <= 0 or temporal.get('unknown_trials',0) <= 0):return False
             return True
         except (OSError,TypeError,KeyError,ValueError,AttributeError):return False
 
@@ -86,4 +98,7 @@ class AutomaticAttendance:
         eligible=[f['top1']['student']['id'] for f in faces if f.get('identity_confirmed') is True
             and not f.get('outside_class') and f.get('eligible_for_confirmation') and f.get('top1',{}).get('student')]
         if not eligible:return dict(enabled=False,reason='no_verified_fresh_identity_or_missing_evaluation',changed=False)
-        return self.attendance.confirm_verified(session_id,eligible,cancelled,received_at,continuity_check)
+        evidence={f['top1']['student']['id']:dict(similarity=f['top1'].get('similarity'),margin=f.get('margin')) for f in faces if f.get('top1',{}).get('student') and f['top1']['student']['id'] in eligible}
+        if any(type(v) not in (int,float) or not math.isfinite(v) for scores in evidence.values() for v in scores.values()):
+            return dict(enabled=False,changed=False,reason='verification_scores_missing_or_invalid')
+        return self.attendance.confirm_verified(session_id,eligible,cancelled,received_at,continuity_check,evidence)

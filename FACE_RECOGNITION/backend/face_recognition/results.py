@@ -7,7 +7,7 @@ def normalize_faces(faces,source_type,records=(),timestamp=None):
     output=[]
     for face in faces:
         top=face.get('top1') or {};person=top.get('student')
-        unknown=not person or face.get('outside_class') or face.get('decision')=='rejected'
+        unknown=not person or face.get('outside_class') or face.get('decision')=='rejected' or (source_type=='live_camera' and face.get('identity_confirmed') is not True)
         person=None if unknown else person
         attendance=present.get(person['id']) if person else None
         verified=bool(person and face.get('identity_confirmed'))
