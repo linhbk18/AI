@@ -60,20 +60,16 @@ def gate_match(best_candidate,best_similarity,second_candidate,second_similarity
 class FaceMatcher:
     """Maximum sample cosine per student, then compare distinct student top two."""
     def __init__(self,records,config,gallery_sha256,policy=None):
-        if not records:
-            raise ValueError('Empty registered gallery')
         self.dimension=config['embedding_dimension']
-        vectors=np.asarray([r['embedding'] for r in records],dtype=np.float64)
+        vectors=np.asarray([r['embedding'] for r in records],dtype=np.float64) if records else np.empty((0,self.dimension),dtype=np.float64)
         if vectors.ndim!=2 or vectors.shape[1]!=self.dimension or not np.isfinite(vectors).all():
             raise ValueError('Invalid gallery vectors')
         norms=np.linalg.norm(vectors,axis=1)
         if np.any(norms==0):
             raise ValueError('Zero-norm registered vector')
-        self.matrix=vectors/norms[:,None]
+        self.matrix=vectors/norms[:,None] if len(vectors) else vectors
         self.records=records
         self.students=sorted({r['student_id'] for r in records})
-        if len(self.students)<2:
-            raise ValueError('Need at least two distinct registered identities for a margin')
         self.signature=pipeline_signature(config,gallery_sha256)
         self.policy=policy
 
@@ -81,13 +77,19 @@ class FaceMatcher:
         vector=np.asarray(embedding,dtype=np.float64)
         if vector.shape!=(self.dimension,) or not np.isfinite(vector).all() or np.linalg.norm(vector)==0:
             raise ValueError('Invalid query embedding')
-        scores=np.clip(self.matrix@(vector/np.linalg.norm(vector)),-1.,1.)
+        if allowed_students is None:
+            indices=list(range(len(self.records)))
+        else:
+            allowed=set(allowed_students)
+            indices=[i for i,r in enumerate(self.records) if r['student_id'] in allowed]
+        if not indices:return None
+        selected=np.asarray(indices,dtype=np.int64)
+        scores=np.clip(self.matrix[selected]@(vector/np.linalg.norm(vector)),-1.,1.)
         ranked=[]
-        for student in self.students:
-            if allowed_students is not None and student not in allowed_students:continue
-            indices=[i for i,r in enumerate(self.records) if r['student_id']==student]
-            best=max(indices,key=lambda i:float(scores[i]))
-            ranked.append((student,float(scores[best]),self.records[best]['source']))
+        for student in sorted({self.records[i]['student_id'] for i in indices}):
+            student_indices=[j for j,i in enumerate(indices) if self.records[i]['student_id']==student]
+            best=max(student_indices,key=lambda j:float(scores[j]));record_index=indices[best]
+            ranked.append((student,float(scores[best]),self.records[record_index]['source']))
         ranked.sort(key=lambda r:(-r[1],r[0]))
         if not ranked:return None
         if len(ranked)==1:

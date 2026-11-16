@@ -1,29 +1,33 @@
 """Management API tests use disposable SQLite and an explicit AI test double."""
-from io import BytesIO
 import json
 from pathlib import Path
+import base64
 import re
 import sqlite3
 import tempfile
 import subprocess
 import sys
 import unittest
+from unittest.mock import patch
 
 from backend.app import create_app
 from backend.database.db import DomainError
-from backend.face_recognition.runtime_service import EngineBusy, EngineUnavailable
-from tests.test_camera_api import FakeEngine, jpeg
+from tests.test_camera_api import FakeEngine,jpeg
 
 ROOT=Path(__file__).resolve().parents[1]
 
 
 class EnrollmentFake(FakeEngine):
     def __init__(self):
-        super().__init__();self.failure=None;self.refreshed=0
+        super().__init__();self.failure=None;self.refreshed=0;self.refresh_result=True;self.state='ready';self.enrollment_frames=0
     def enroll(self,bgr):
         if self.failure:raise self.failure
         return [1.]*512,dict(model_name='ArcFace',detector_backend='retinaface',align=True,normalization='base')
-    def refresh_gallery(self):self.refreshed+=1;return True
+    def refresh_gallery(self):self.refreshed+=1;return self.refresh_result
+    def enrollment_frame(self,bgr,posture):
+        index=self.enrollment_frames%512;self.enrollment_frames+=1
+        vector=[0.]*512;vector[index]=1.
+        return dict(accepted=True,embedding=vector,embedding_ms=2.5)
 
 
 class ManagementAPI(unittest.TestCase):
@@ -41,9 +45,6 @@ class ManagementAPI(unittest.TestCase):
     def post(self,url,data):return self.client.post(url,json=data,headers=self.headers)
     def student(self,code='SV-TEST'):return self.post('/api/students',dict(student_code=code,full_name='Sinh viên kiểm thử')).json
     def classroom(self,code='LOP-TEST'):return self.post('/api/classes',dict(class_code=code,class_name='Lớp kiểm thử',description='Mô tả')).json
-    def upload(self,sid,data=None,confirmed='true'):
-        return self.client.post(f'/api/students/{sid}/faces',headers=self.headers,data=dict(image=(BytesIO(jpeg() if data is None else data),'test.jpg'),confirmed=confirmed),content_type='multipart/form-data')
-
     def test_empty_realistic_overview_pages_and_no_seed(self):
         self.assertEqual(self.client.get('/api/overview').json,dict(classes=0,students=0,registered_students=0))
         for page in ('/overview','/classes','/students','/students/1','/classes/1'):
@@ -92,24 +93,22 @@ class ManagementAPI(unittest.TestCase):
         self.assertEqual(self.post(f"/api/classes/{c['id']}/students",dict(student_id=999)).status_code,404)
 
     def test_enrollment_persists_vectors_no_public_vector_and_protects_student(self):
-        s=self.student();r=self.upload(s['id'])
-        self.assertEqual(r.status_code,201,r.json)
-        self.assertNotIn('embedding',r.json)
+        c=self.classroom();store=self.app.extensions['management_store']
+        samples=[dict(posture=pose,embedding=[1.]+[0.]*511) for pose in ('thẳng','quay_trái','quay_phải','ngẩng_nhẹ','cúi_nhẹ')]
+        sid=store.create_student_with_embeddings(dict(student_code='SV-CAMERA',full_name='Sinh viên webcam'),c['id'],samples)
+        s=self.client.get(f'/api/students/{sid}').json
+        self.assertEqual(s['face_count'],5)
         self.assertEqual(self.client.get('/api/overview').json['registered_students'],1)
-        self.assertEqual(self.engine.refreshed,1)
-        self.assertEqual(self.upload(s['id']).status_code,409)
-        self.assertEqual(self.upload(s['id'],jpeg((321,180))).status_code,201)
         self.assertEqual(self.client.delete(f"/api/students/{s['id']}",headers=self.headers).status_code,409)
         # A fresh app/connection sees the same persisted data; no in-memory DB.
         restarted=create_app(EnrollmentFake(),start_models=False,overrides={'DATABASE_PATH':self.db}).test_client()
-        self.assertEqual(restarted.get(f"/api/students/{s['id']}").json['face_count'],2)
+        self.assertEqual(restarted.get(f"/api/students/{s['id']}").json['face_count'],5)
         with sqlite3.connect(self.db) as db:
-            vector=json.loads(db.execute('SELECT embedding_json FROM face_embeddings').fetchone()[0]);self.assertEqual(len(vector),512)
+            vector=json.loads(db.execute('SELECT embedding_json FROM face_embeddings LIMIT 1').fetchone()[0]);self.assertEqual(len(vector),512)
 
     def test_persistence_in_fresh_python_process(self):
-        s=self.student();c=self.classroom()
-        self.post(f"/api/classes/{c['id']}/students",dict(student_id=s['id']))
-        self.assertEqual(self.upload(s['id']).status_code,201)
+        c=self.classroom();store=self.app.extensions['management_store']
+        sid=store.create_student_with_embeddings(dict(student_code='SV-PERSIST',full_name='Persisted'),c['id'],[dict(posture='thẳng',embedding=[1.]+[0.]*511)])
         # Reopen Flask and SQLite in an entirely fresh interpreter, not just RAM.
         code="""import sys,json
 from backend.app import create_app
@@ -118,21 +117,76 @@ app=create_app(EnrollmentFake(),start_models=False,overrides={'DATABASE_PATH':sy
 with app.test_client() as c:
  print(json.dumps(c.get('/api/students/'+sys.argv[2]).json))
 """
-        result=subprocess.run([sys.executable,'-c',code,str(self.db),str(s['id'])],cwd=ROOT,capture_output=True,text=True,encoding='utf-8',timeout=30)
+        result=subprocess.run([sys.executable,'-c',code,str(self.db),str(sid)],cwd=ROOT,capture_output=True,text=True,encoding='utf-8',timeout=30)
         self.assertEqual(result.returncode,0,result.stderr)
         restored=json.loads(result.stdout)
-        self.assertEqual(restored['student_code'],'SV-TEST')
+        self.assertEqual(restored['student_code'],'SV-PERSIST')
         self.assertEqual(restored['face_count'],1)
         self.assertEqual(len(restored['classes']),1)
 
     def test_enrollment_validation_errors_are_explicit_and_not_saved(self):
         s=self.student()
-        self.assertEqual(self.upload(s['id'],confirmed='false').status_code,400)
-        self.assertEqual(self.upload(s['id'],b'not an image').status_code,422)
-        for exc,status in ((ValueError('NO_FACE'),422),(ValueError('MULTIPLE_FACES'),422),(EngineBusy(),429),(EngineUnavailable(),503)):
-            self.engine.failure=exc;response=self.upload(s['id']);self.assertEqual(response.status_code,status,response.json)
+        self.assertEqual(self.client.post(f"/api/students/{s['id']}/faces",headers=self.headers).status_code,404)
+        self.assertFalse(self.client.get(f"/api/students/{s['id']}").json['face_count'])
+        self.assertTrue(self.post('/api/students/check-code',dict(student_code='SV-TEST')).json['exists'])
+        self.assertFalse(self.post('/api/students/check-code',dict(student_code='SV-NEW')).json['exists'])
+        self.assertFalse(self.post('/api/students/check-code',dict(student_code='241121514142')).json['exists'])
+        self.assertEqual(self.post('/api/students/check-code',dict(student_code='')).status_code,400)
+        started=self.post('/api/enrollment/start',{});self.assertEqual(started.status_code,201)
+        self.assertEqual(self.client.get('/api/overview').json['students'],1)
+        self.post('/api/enrollment/cancel',dict(session=started.json['session']))
+        c=self.classroom()
+        with self.assertRaises(DomainError):
+            self.app.extensions['management_store'].create_student_with_embeddings(dict(student_code='SV-TEST',full_name='Duplicate'),c['id'],[dict(posture='thẳng',embedding=[1.]+[0.]*511)])
         self.assertEqual(self.client.get(f"/api/students/{s['id']}").json['face_count'],0)
-        self.assertEqual(self.upload(s['id'],b'x'*(4*1024*1024+1)).status_code,413)
+
+    def test_reenrollment_restores_old_vectors_if_publish_is_rejected(self):
+        c=self.classroom();store=self.app.extensions['management_store']
+        sid=store.create_student_with_embeddings(dict(student_code='SV-REPLACE',full_name='Replace me'),c['id'],[dict(posture='thẳng',embedding=[1.]+[0.]*511)])
+        with store.connection() as db:before=dict(db.execute('SELECT * FROM face_embeddings WHERE student_id=?',(sid,)).fetchone())
+        previous=store.replace_student_embeddings(sid,[dict(posture='quay_trái',embedding=[0.,1.]+[0.]*510)])
+        self.assertEqual(len(previous),1)
+        store.restore_student_embeddings(sid,previous)
+        with store.connection() as db:after=dict(db.execute('SELECT * FROM face_embeddings WHERE student_id=?',(sid,)).fetchone())
+        self.assertEqual(after,before)
+
+    def test_camera_enrollment_session_publishes_only_after_final_confirmation(self):
+        c=self.classroom()
+        with patch('backend.management.MIN_SAMPLE_INTERVAL_SECONDS',0):
+            started=self.post('/api/enrollment/start',{})
+            self.assertEqual(started.status_code,201)
+            session=started.json['session']
+            self.assertEqual(self.client.get('/api/overview').json['students'],0)
+            frame=base64.b64encode(jpeg()).decode('ascii')
+            for _ in range(30):
+                response=self.post('/api/enrollment/frame',dict(session=session,frame=frame))
+                self.assertEqual(response.status_code,200,response.json)
+                self.assertTrue(response.json['accepted'])
+            self.assertTrue(response.json['complete'])
+            self.assertEqual(self.client.get('/api/overview').json['students'],0)
+            self.assertEqual(self.post('/api/enrollment/duplicate-check',dict(session=session)).status_code,200)
+            saved=self.post('/api/enrollment/finish',dict(session=session,student_code='SV-CAM',full_name='Camera student',class_id=c['id'],identity_confirmed=True,gallery_warning_acknowledged=True))
+        self.assertEqual(saved.status_code,201,saved.json)
+        self.assertTrue(saved.json['gallery_updated'])
+        self.assertEqual(saved.json['embedding_count'],30)
+        self.assertEqual(self.engine.refreshed,1)
+        student=self.client.get(f"/api/students/{saved.json['student_id']}").json
+        self.assertEqual(student['face_count'],30)
+        with sqlite3.connect(self.db) as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM face_embeddings WHERE image_sha256 IS NOT NULL').fetchone()[0],0)
+
+    def test_gallery_publish_failure_rolls_back_new_student_and_vectors(self):
+        c=self.classroom()
+        with patch('backend.management.MIN_SAMPLE_INTERVAL_SECONDS',0):
+            session=self.post('/api/enrollment/start',{}).json['session'];frame=base64.b64encode(jpeg()).decode('ascii')
+            for _ in range(30):self.assertEqual(self.post('/api/enrollment/frame',dict(session=session,frame=frame)).status_code,200)
+            self.post('/api/enrollment/duplicate-check',dict(session=session))
+            self.engine.refresh_result=False
+            response=self.post('/api/enrollment/finish',dict(session=session,student_code='SV-ROLLBACK',full_name='No partial row',class_id=c['id'],identity_confirmed=True,gallery_warning_acknowledged=True))
+        self.assertEqual(response.status_code,503,response.json)
+        self.assertEqual(self.client.get('/api/overview').json['students'],0)
+        store=self.app.extensions['management_store'];gallery,_=store.gallery_snapshot()
+        self.assertEqual(len(gallery),92)
 
     def test_legacy_mapping_manual_unique_originals_preserved(self):
         s=self.student();other=self.student('OTHER')
@@ -158,6 +212,34 @@ with app.test_client() as c:
         for vector in ([0.]*512,[float('nan')]*512,[1.]*3):
             with self.assertRaises(DomainError):
                 store.add_embedding(s['id'],vector,{},'bad')
+
+    def test_stateless_extract_face_and_register_student(self):
+        c=self.classroom('LOP-STATELESS')
+        frame=base64.b64encode(jpeg()).decode('ascii')
+        # Test extract_face
+        res=self.post('/api/extract_face',dict(frame=frame))
+        self.assertEqual(res.status_code,200,res.json)
+        self.assertTrue(res.json.get('success'))
+        self.assertIn('embedding',res.json)
+        self.assertIn('posture',res.json)
+        emb=res.json['embedding']
+
+        # Test register_student
+        samples=[dict(posture='thẳng',embedding=emb) for _ in range(5)]
+        reg=self.post('/api/register_student',dict(
+            student_code='SV-STATELESS',
+            full_name='Stateless Student',
+            class_id=c['id'],
+            embeddings=samples
+        ))
+        self.assertEqual(reg.status_code,201,reg.json)
+        self.assertTrue(reg.json.get('saved'))
+        self.assertGreater(reg.json.get('student_id'),0)
+
+        # Verify student exists in overview
+        detail=self.client.get(f"/api/students/{reg.json['student_id']}").json
+        self.assertEqual(detail['student_code'],'SV-STATELESS')
+        self.assertEqual(detail['face_count'],5)
 
 
 if __name__=='__main__':unittest.main()

@@ -13,12 +13,14 @@ import numpy as np
 
 from .face_service import FaceMatcher
 from .camera_pipeline import CameraPipeline, YuNetDetector, PROFILES
+from .enrollment_quality import face_box_feedback,frame_quality_feedback,estimate_head_pose,posture_matches,classify_posture
 
 ROOT = Path(__file__).resolve().parents[2]
 OUTPUTS = ROOT / 'outputs'
 SETTING_KEYS = ('model_name', 'detector_backend', 'align', 'normalization',
                 'enforce_detection', 'expand_percentage', 'anti_spoofing', 'max_faces')
 logger = logging.getLogger(__name__)
+CLASS_SCOPE_MIN_COSINE=.70
 
 
 class EngineBusy(Exception):
@@ -62,6 +64,7 @@ class RecognitionEngine:
         self._gallery_revision=-1
         self._preview_guard=threading.Lock()
         self._public_identities={}
+        self._class_matchers={}
 
     def configure_store(self, store):
         self.management_store=store
@@ -81,6 +84,24 @@ class RecognitionEngine:
             self.matcher=matcher
             self._gallery_revision=revision
             self._public_identities=identities
+            self._class_matchers.clear()
+
+    def _class_matcher(self,class_id,allowed_student_ids):
+        allowed=tuple(sorted(set(allowed_student_ids or ())))
+        key=(self._gallery_revision,int(class_id),allowed)
+        cached=self._class_matchers.get(key)
+        if cached is not None:return cached
+        records=[]
+        id_to_gallery_key={person['id']:key for key,person in self._public_identities.items()}
+        scoped_student_ids={id_to_gallery_key[sid] for sid in allowed if sid in id_to_gallery_key}
+        for record in self.matcher.records:
+            if record['student_id'] in scoped_student_ids:records.append(record)
+        digest=hashlib.sha256(json.dumps(dict(base=self.matcher.signature,class_id=int(class_id),students=allowed,
+            records=records),sort_keys=True).encode()).hexdigest()
+        scoped=FaceMatcher(records,self._gallery_config,digest,None)
+        if len(self._class_matchers)>=64:self._class_matchers.clear()
+        self._class_matchers[key]=scoped
+        return scoped
 
     def detect_preview(self,bgr,cancelled=lambda:False):
         """Anonymous boxes only; independent of the single ArcFace inference lock."""
@@ -177,32 +198,93 @@ class RecognitionEngine:
         finally:
             self._guard.release()
 
-    def enroll(self,bgr):
-        """Original RetinaFace/ArcFace enrollment, one aligned face, no raw image persistence."""
+    def enrollment_frame(self,bgr,posture):
+        """Score a transient webcam frame and return one normalized ArcFace vector only when valid."""
         if self.state!='ready': raise EngineUnavailable()
         if not self._guard.acquire(blocking=False): raise EngineBusy()
         try:
+            import cv2
+            started=time.perf_counter()
+            height,width=bgr.shape[:2]
+            faces=self.pipeline.yunet.detect_faces(bgr,dimension=640,score_threshold=.6)
+            if not faces:return dict(accepted=False,reason='Đưa khuôn mặt vào khung hình.',face_count=0)
+            if len(faces)!=1:return dict(accepted=False,reason='Đảm bảo chỉ có một khuôn mặt trong khung.',face_count=len(faces))
+            face=faces[0];x,y,w,h=face.x,face.y,face.w,face.h
+            box_feedback=face_box_feedback(width,height,x,y,w,h,face.confidence)
+            if box_feedback:return dict(accepted=False,reason=box_feedback,face_count=1)
+            gray=cv2.cvtColor(bgr[y:y+h,x:x+w],cv2.COLOR_BGR2GRAY)
+            sharpness=float(cv2.Laplacian(gray,cv2.CV_64F).var())
+            brightness=float(gray.mean())
+            quality_feedback=frame_quality_feedback(sharpness,brightness)
+            if quality_feedback:return dict(accepted=False,reason=quality_feedback,face_count=1,sharpness=sharpness,brightness=brightness)
+            # Landmark based pose estimates; thresholds are calibration starting points, not biometric proof.
+            yaw,pitch=estimate_head_pose(face.left_eye,face.right_eye,face.nose_tip,face.left_mouth,face.right_mouth)
+            if not posture_matches(posture,yaw,pitch):return dict(accepted=False,reason='Hãy thực hiện đúng tư thế đang được hướng dẫn.',face_count=1,yaw=yaw,pitch=pitch,sharpness=sharpness,brightness=brightness)
             try:
-                faces=self.model.extract_faces(img_path=bgr,detector_backend=self.settings['detector_backend'],
-                    enforce_detection=True,align=self.settings['align'],expand_percentage=0,
-                    color_face='rgb',normalize_face=True,anti_spoofing=False)
+                extracted=self.model.extract_faces(img_path=bgr,detector_backend=self.settings['detector_backend'],
+                    enforce_detection=True,align=self.settings['align'],expand_percentage=0,color_face='rgb',normalize_face=True,anti_spoofing=False)
             except ValueError as exc:
-                if 'Face could not be detected' in str(exc): raise ValueError('NO_FACE') from exc
+                if 'Face could not be detected' in str(exc):return dict(accepted=False,reason='Không căn chỉnh được khuôn mặt. Hãy nhìn rõ vào camera.',face_count=0)
                 raise
-            if not faces: raise ValueError('NO_FACE')
-            if len(faces)!=1: raise ValueError('MULTIPLE_FACES')
+            if len(extracted)!=1:return dict(accepted=False,reason='AI chưa căn chỉnh được đúng một khuôn mặt.',face_count=len(extracted))
             from deepface.modules import preprocessing
-            image=faces[0]['face'][:,:,::-1]
+            image=extracted[0]['face'][:,:,::-1]
             tensor=preprocessing.resize_image(image,target_size=(self.pipeline.model.input_shape[1],self.pipeline.model.input_shape[0]))
             tensor=preprocessing.normalize_input(tensor,normalization=self.settings['normalization'])
-            vector=np.asarray(self.pipeline.model.forward(tensor),dtype=float)
-            if vector.shape!=(512,) or not np.isfinite(vector).all() or np.linalg.norm(vector)==0:
-                raise ValueError('INVALID_EMBEDDING')
-            return vector.tolist(),dict(model_name='ArcFace',detector_backend='retinaface',align=True,
-                normalization='base',embedding_dimension=512,enforce_detection=True,expand_percentage=0,
-                anti_spoofing=False,attribution='manually_confirmed_by_operator_not_biometrically_verified')
-        finally:
-            self._guard.release()
+            embedding_started=time.perf_counter()
+            vector=np.asarray(self.pipeline.model.forward(tensor),dtype=np.float64).reshape(-1)
+            embedding_ms=(time.perf_counter()-embedding_started)*1000
+            norm=float(np.linalg.norm(vector))
+            if vector.shape!=(512,) or not np.isfinite(vector).all() or norm==0:raise ValueError('INVALID_EMBEDDING')
+            vector=(vector/norm).tolist()
+            return dict(accepted=True,embedding=vector,face_count=1,yaw=yaw,pitch=pitch,sharpness=sharpness,
+                brightness=brightness,embedding_ms=embedding_ms,processing_ms=(time.perf_counter()-started)*1000)
+        finally:self._guard.release()
+
+    def extract_face_stateless(self,bgr):
+        """Stateless extraction: detects face, estimates pose (yaw, pitch, posture), and extracts normalized ArcFace embedding."""
+        if self.state!='ready':raise EngineUnavailable()
+        if not self._guard.acquire(timeout=2.0):raise EngineBusy()
+        try:
+            import cv2
+            started=time.perf_counter()
+            height,width=bgr.shape[:2]
+            faces=self.pipeline.yunet.detect_faces(bgr,dimension=640,score_threshold=.6)
+            if not faces:return dict(success=False,face_found=False,message='Không tìm thấy mặt trong khung hình.',reason='Không tìm thấy mặt trong khung hình.')
+            if len(faces)!=1:return dict(success=False,face_found=True,face_count=len(faces),message='Đảm bảo chỉ có một khuôn mặt trong khung.',reason='Đảm bảo chỉ có một khuôn mặt trong khung.')
+            face=faces[0];x,y,w,h=face.x,face.y,face.w,face.h
+            box_feedback=face_box_feedback(width,height,x,y,w,h,face.confidence)
+            if box_feedback:return dict(success=False,face_found=True,face_count=1,message=box_feedback,reason=box_feedback)
+            crop=bgr[max(0,y):min(height,y+h),max(0,x):min(width,x+w)]
+            if crop.size==0:return dict(success=False,face_found=True,face_count=1,message='Khuôn mặt nằm ngoài khung hình.',reason='Khuôn mặt nằm ngoài khung hình.')
+            gray=cv2.cvtColor(crop,cv2.COLOR_BGR2GRAY)
+            sharpness=float(cv2.Laplacian(gray,cv2.CV_64F).var())
+            brightness=float(gray.mean())
+            quality_feedback=frame_quality_feedback(sharpness,brightness)
+            if quality_feedback:return dict(success=False,face_found=True,face_count=1,message=quality_feedback,reason=quality_feedback,sharpness=sharpness,brightness=brightness)
+            yaw,pitch=estimate_head_pose(face.left_eye,face.right_eye,face.nose_tip,face.left_mouth,face.right_mouth)
+            posture=classify_posture(yaw,pitch)
+            try:
+                extracted=self.model.extract_faces(img_path=bgr,detector_backend=self.settings['detector_backend'],
+                    enforce_detection=True,align=self.settings['align'],expand_percentage=0,color_face='rgb',normalize_face=True,anti_spoofing=False)
+            except Exception as exc:
+                return dict(success=False,face_found=False,message='Không căn chỉnh được khuôn mặt. Hãy nhìn rõ vào camera.',reason=str(exc))
+            if len(extracted)!=1:return dict(success=False,face_found=True,face_count=len(extracted),message='AI chưa căn chỉnh được đúng một khuôn mặt.',reason='AI chưa căn chỉnh được đúng một khuôn mặt.')
+            from deepface.modules import preprocessing
+            image=extracted[0]['face'][:,:,::-1]
+            tensor=preprocessing.resize_image(image,target_size=(self.pipeline.model.input_shape[1],self.pipeline.model.input_shape[0]))
+            tensor=preprocessing.normalize_input(tensor,normalization=self.settings['normalization'])
+            embedding_started=time.perf_counter()
+            vector=np.asarray(self.pipeline.model.forward(tensor),dtype=np.float64).reshape(-1)
+            embedding_ms=(time.perf_counter()-embedding_started)*1000
+            norm=float(np.linalg.norm(vector))
+            if vector.shape!=(512,) or not np.isfinite(vector).all() or norm==0:raise ValueError('INVALID_EMBEDDING')
+            vector=(vector/norm).tolist()
+            posture_labels={'thẳng':'Nhìn thẳng','quay_trái':'Quay đầu sang trái','quay_phải':'Quay đầu sang phải','ngẩng_nhẹ':'Ngẩng nhẹ','cúi_nhẹ':'Cúi nhẹ'}
+            return dict(success=True,face_found=True,face_count=1,posture=posture,posture_label=posture_labels.get(posture),
+                message='Trích xuất khuôn mặt thành công.',yaw=round(float(yaw),2),pitch=round(float(pitch),2),sharpness=round(sharpness,1),brightness=round(brightness,1),
+                embedding=vector,embedding_ms=round(embedding_ms,2),processing_ms=round((time.perf_counter()-started)*1000,2))
+        finally:self._guard.release()
 
     def start_loading(self):
         with self._state_guard:
@@ -304,7 +386,7 @@ class RecognitionEngine:
                         preview_detector='YuNet · vị trí khuôn mặt, không nhận diện',
                         busy=self._guard.locked(), last_processing_ms=self.last_processing_ms)
 
-    def analyze(self, bgr, cancelled=lambda: False, profile='retinaface_reuse',allowed_student_ids=None):
+    def analyze(self, bgr, cancelled=lambda: False, profile='retinaface_reuse',allowed_student_ids=None,class_id=None):
         if self.state != 'ready':
             raise EngineUnavailable()
         if not self._guard.acquire(blocking=False):
@@ -314,6 +396,7 @@ class RecognitionEngine:
             self._refresh_gallery_locked()
             if cancelled():
                 raise SessionStopped()
+            matcher=self._class_matcher(class_id,allowed_student_ids) if class_id is not None else self.matcher
             height, width = bgr.shape[:2]
             try:
                 faces,timings=self.pipeline.run(bgr,profile,cancelled)
@@ -334,26 +417,26 @@ class RecognitionEngine:
                     bottom = min(height, int(area['y'] + area['h']))
                     if right <= x or bottom <= y:
                         raise ValueError('Invalid face bounds')
-                    match = self.matcher.match(face['embedding'])
-                    global_match=match
-                    outside=False
-                    if allowed_student_ids is not None:
-                        global_person=self._public_identities.get(match['best_candidate'])
-                        outside=not global_person or global_person['id'] not in allowed_student_ids
-                    if PROFILES.get(profile,{}).get('experimental',False):
+                    match=matcher.match(face['embedding']) if class_id is not None else self.matcher.match(face['embedding'],allowed_students=allowed_student_ids)
+                    scope_match=bool(match and (class_id is None or match['best_similarity']>=CLASS_SCOPE_MIN_COSINE))
+                    unknown=not scope_match
+                    if match and PROFILES.get(profile,{}).get('experimental',False):
                         # Enrollment rejection thresholds cannot be inherited by a different detector.
                         match['decision']='unconfirmed'
                     verifier=getattr(self,'automatic_verifier',None)
-                    verified=bool(verifier and verifier.verify(global_match,self.matcher.signature,profile,self.matcher.policy))
+                    verified=bool(class_id is None and match and verifier and verifier.verify(match,self.matcher.signature,profile,self.matcher.policy))
                     # Explicit public whitelist: no embedding, gallery image or filesystem path.
                     public_faces.append(dict(face_id=len(public_faces) + 1,
                         box=dict(x=x, y=y, w=right-x, h=bottom-y),
-                        top1=dict(candidate=match['best_candidate'], similarity=match['best_similarity'],student=self._public_identities.get(match['best_candidate'])),
-                        top2=dict(candidate=match['second_candidate'], similarity=match['second_similarity']),
-                        margin=match['margin'], decision='verified_for_automatic_attendance' if verified else match['decision'],
-                        eligible_for_confirmation=bool(self._public_identities.get(match['best_candidate'])) and not outside,
-                        outside_class=outside,
-                        identity_confirmed=verified, label='Đã xác minh' if verified else 'Ứng viên chưa xác nhận',
+                        status='unknown' if unknown else 'candidate',
+                        name='Không xác định' if unknown else self._public_identities.get(match['best_candidate'],{}).get('full_name'),
+                        top1=dict(candidate=match['best_candidate'] if scope_match else None, similarity=match['best_similarity'] if scope_match else None,
+                            student=self._public_identities.get(match['best_candidate']) if scope_match else None),
+                        top2=dict(candidate=match['second_candidate'] if scope_match else None, similarity=match['second_similarity'] if scope_match else None),
+                        margin=match['margin'] if scope_match else None, decision='verified_for_automatic_attendance' if verified else ('unknown' if unknown else match['decision']),
+                        eligible_for_confirmation=bool(scope_match and self._public_identities.get(match['best_candidate'])),
+                        outside_class=False,scope_match=scope_match,unknown=unknown,
+                        identity_confirmed=verified, label='Không xác định' if unknown else ('Đã xác minh' if verified else 'Ứng viên chưa xác nhận'),
                         manual_review_required=not verified))
                 except Exception:
                     errors += 1
