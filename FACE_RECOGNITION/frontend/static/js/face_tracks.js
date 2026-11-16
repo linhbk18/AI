@@ -45,10 +45,11 @@
         const list=matches[i];if(list.length!==1||matches.filter(m=>m.includes(list[0])).length!==1)continue;
         const saved=list[0],track=this.tracks.find(t=>t.id===saved.id),face=faces[i];
         if(!track||track.invalid||now-saved.at>30000||now-track.at>2500||difference(saved.signature,track.signature)>=.065)continue;
-        track.candidate=face.top1?.student&&Number.isFinite(face.top1.similarity)?face:null;
-        track.unknown=!track.candidate;track.stale=false;
-        // Display lease only. Cached candidates are never automatic-attendance evidence.
-        track.expires=Math.min(now+20000,saved.at+30000);track.removeAt=Math.min(now+30000,saved.at+40000);
+        // Backend-classified face (IN_CLASS / UNKNOWN / VERIFIED). PROCESSING keeps the box grey.
+        track.candidate=face.status&&face.status!=='PROCESSING'?face:null;
+        track.unknown=false;track.stale=false;
+        // Display lease only (same continuous face). Writes are decided on the server with a 2 s limit.
+        track.expires=Math.min(now+FaceTracks.displayLeaseMs,saved.at+FaceTracks.displayLeaseMs+4000);track.removeAt=track.expires+1000;
         this.lastApply.linked++;
       }
     }
@@ -59,5 +60,6 @@
       return t;
     });}
   }
+  FaceTracks.displayLeaseMs=8000;
   window.SafeFaceTracks=FaceTracks;
 })();

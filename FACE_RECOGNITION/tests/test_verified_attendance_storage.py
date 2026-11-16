@@ -62,23 +62,17 @@ class Storage(unittest.TestCase):
         reopened=AttendanceService(ManagementStore(self.store.path,ROOT/'outputs/face_embeddings.json'))
         self.assertEqual(reopened.detail(sid)['stats']['present'],1)
 
-    def test_automatic_service_contract_with_explicit_protocol_fixture(self):
-        # Protocol fixture only, NOT evidence of ArcFace identity verification.
-        # No production policy or attendance database is changed.
-        automatic=AutomaticAttendance(self.service,True)
-        face=dict(identity_confirmed=True,outside_class=False,eligible_for_confirmation=True,
-            top1={'student':{'id':self.people[0]['id']},'similarity':.9},margin=.2)
-        stale=automatic.apply(self.sid,[face],lambda:False,time.monotonic()-8,lambda:False)
-        self.assertFalse(stale['changed'])
+    def test_confirm_auto_contract_with_explicit_protocol_fixture(self):
+        # Storage protocol only, NOT evidence of ArcFace identity verification.
+        student=self.people[0]['id']
+        stale=self.service.confirm_auto(self.sid,student,.9,.2,lambda:False)
+        self.assertFalse(stale['changed']);self.assertEqual(stale['reason'],'stale_or_track_lost')
         self.assertEqual(self.service.detail(self.sid)['stats']['present'],0)
-        for key in ('identity_confirmed','eligible_for_confirmation'):
-            rejected=automatic.apply(self.sid,[dict(face,**{key:False})],lambda:False,time.monotonic(),lambda:True)
-            self.assertFalse(rejected['changed'])
-        self.assertFalse(automatic.apply(self.sid,[dict(face,outside_class=True)],lambda:False,time.monotonic(),lambda:True)['changed'])
-        committed=automatic.apply(self.sid,[face],lambda:False,time.monotonic()-8,lambda:True)
+        committed=self.service.confirm_auto(self.sid,student,.9,.2,lambda:True)
         self.assertTrue(committed['changed'])
-        self.assertEqual(committed['session']['records'][0]['recognition_source'],'AI_VERIFIED')
-        self.assertFalse(automatic.apply(self.sid,[face],lambda:False,time.monotonic(),lambda:True)['changed'])
+        row=next(r for r in self.service.detail(self.sid)['records'] if r['student_id']==student)
+        self.assertEqual((row['recognition_source'],row['source'],row['similarity'],row['margin']),('AI_VERIFIED','auto',.9,.2))
+        self.assertFalse(self.service.confirm_auto(self.sid,student,.9,.2,lambda:True)['changed'])
 
     def test_auto_audit_survives_manual_edit_and_restart(self):
         student=self.people[0]['id']

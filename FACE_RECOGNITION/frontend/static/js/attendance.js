@@ -87,9 +87,10 @@
     window.addEventListener('camera:candidates',e=>{
       const {faces,sessionId}=e.detail;if(!active||active.status!=='IN_PROGRESS'||active.id!==sessionId)return;
       document.querySelectorAll('.candidate-item').forEach((card,index)=>{
-        const f=faces[index],sid=f.top1.student?.id,r=active.records.find(r=>r.student_id===sid);const b=document.createElement('button');b.className='button secondary attendance-confirm';if(sid)b.dataset.studentId=String(sid);
-        if(!r||f.outside_class||f.eligible_for_confirmation===false){b.textContent=f.identity_confirmed&&f.outside_class?'Ứng viên toàn cục ngoài lớp · chọn thủ công':'Chưa đủ thông tin · chọn thủ công từ danh sách';b.disabled=true;}
-        else if(r.attendance_status==='PRESENT'){b.textContent='Đã điểm danh';b.disabled=true;}
+        const f=faces[index];if(!f||f.status!=='IN_CLASS'||!f.student)return;
+        const sid=f.student.id,r=active.records.find(r=>r.student_id===sid);const b=document.createElement('button');b.className='button secondary attendance-confirm';b.dataset.studentId=String(sid);
+        if(!r)return;
+        if(r.attendance_status==='PRESENT'){b.textContent='Đã điểm danh';b.disabled=true;}
         else if(window.RecognitionDisplay.canConfirmManually(f,r,active,sessionId)){b.textContent='Xác nhận Có mặt (thủ công)';b.onclick=()=>safe(()=>confirmStudent(sid,sessionId));}
         else{b.textContent='Buổi đã thay đổi · chọn lại sinh viên';b.disabled=true;}card.append(b);
       });

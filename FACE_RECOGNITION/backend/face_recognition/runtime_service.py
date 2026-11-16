@@ -13,6 +13,7 @@ import numpy as np
 
 from .face_service import FaceMatcher
 from .camera_pipeline import CameraPipeline, YuNetDetector, PROFILES
+from .verification_policy import VerificationPolicy, POLICY_PATH
 
 ROOT = Path(__file__).resolve().parents[2]
 OUTPUTS = ROOT / 'outputs'
@@ -62,6 +63,8 @@ class RecognitionEngine:
         self._gallery_revision=-1
         self._preview_guard=threading.Lock()
         self._public_identities={}
+        self.verification_policy=VerificationPolicy.load(POLICY_PATH)
+        self.verification_policy_path=POLICY_PATH
 
     def configure_store(self, store):
         self.management_store=store
@@ -76,7 +79,15 @@ class RecognitionEngine:
         matcher=FaceMatcher(records,self._gallery_config,digest,None)
         if self._base_policy and self._base_policy.get('pipeline_signature')==matcher.signature:
             matcher.policy=self._base_policy
-        identities={s['student_code']+' · '+s['full_name']:dict(id=s['id'],student_code=s['student_code'],full_name=s['full_name'],code_is_temporary=bool(s['student_code_is_temporary'])) for s in self.management_store.list_entities('students')}
+        # Gallery label -> numeric SQLite student id. Labels are built from the
+        # UNIQUE student_code by the same rule as ManagementStore._snapshot; the
+        # class/enrollment decision downstream uses only the numeric id.
+        identities={}
+        for s in self.management_store.list_entities('students'):
+            label=s['student_code']+' · '+s['full_name']
+            if label in identities:identities[label]=None  # ambiguous -> never an identity
+            else:identities[label]=dict(id=s['id'],student_code=s['student_code'],full_name=s['full_name'],code_is_temporary=bool(s['student_code_is_temporary']))
+        identities={k:v for k,v in identities.items() if v is not None}
         with self._state_guard:
             self.matcher=matcher
             self._gallery_revision=revision
@@ -248,6 +259,7 @@ class RecognitionEngine:
                 raise ValueError('Expected five registered identities')
             policy = json.loads((OUTPUTS / 'recognition_threshold.json').read_text(encoding='utf-8'))
             self.matcher = FaceMatcher(gallery, config, file_hash(gallery_file), policy)
+            self.verification_policy=VerificationPolicy.load(self.verification_policy_path,config)
             self._gallery_config=config
             self._base_gallery_hash=file_hash(gallery_file)
             self._base_policy=policy
@@ -295,7 +307,8 @@ class RecognitionEngine:
                         model_name='ArcFace', detector_backend='retinaface', align=True, normalization='base',
                         registered_embeddings=len(self.matcher.records) if self.matcher is not None else 0,
                         registered_students=len(self.matcher.students) if self.matcher is not None else 0,
-                        threshold_enabled=bool(self.matcher and self.matcher.policy and self.matcher.policy.get('enabled')),
+                        threshold_enabled=bool(self.verification_policy.valid),
+                        gallery_signature=self.matcher.signature if self.matcher is not None else None,
                         identity_confirmation_enabled=False, attendance_enabled=False,
                         model_load_count=self.model_load_count, inference_count=self.inference_count,
                         startup_ms=self.startup_ms, profiles=PROFILES,
@@ -335,25 +348,25 @@ class RecognitionEngine:
                     if right <= x or bottom <= y:
                         raise ValueError('Invalid face bounds')
                     match = self.matcher.match(face['embedding'])
-                    global_match=match
-                    outside=False
-                    if allowed_student_ids is not None:
-                        global_person=self._public_identities.get(match['best_candidate'])
-                        outside=not global_person or global_person['id'] not in allowed_student_ids
-                    if PROFILES.get(profile,{}).get('experimental',False):
-                        # Enrollment rejection thresholds cannot be inherited by a different detector.
-                        match['decision']='unconfirmed'
-                    verifier=getattr(self,'automatic_verifier',None)
-                    verified=bool(verifier and verifier.verify(global_match,self.matcher.signature,profile,self.matcher.policy))
-                    # Explicit public whitelist: no embedding, gallery image or filesystem path.
+                    # GLOBAL top-1/top-2 over every registered student. Never restricted to
+                    # the class roster: an outsider must not be pulled onto a classmate.
+                    person=self._public_identities.get(match['best_candidate'])
+                    verified,reasons=self.verification_policy.verify(match['best_similarity'],match['margin'],profile)
+                    if not person:
+                        verified=False;reasons=reasons+['candidate_not_mapped_to_student_id']
+                    outside=bool(allowed_student_ids is not None and (not person or person['id'] not in allowed_student_ids))
+                    # Internal record. HTTP routes MUST pass it through
+                    # attendance.classification.public_face before returning it.
                     public_faces.append(dict(face_id=len(public_faces) + 1,
                         box=dict(x=x, y=y, w=right-x, h=bottom-y),
-                        top1=dict(candidate=match['best_candidate'], similarity=match['best_similarity'],student=self._public_identities.get(match['best_candidate'])),
+                        top1=dict(candidate=match['best_candidate'], similarity=match['best_similarity'],student=person),
                         top2=dict(candidate=match['second_candidate'], similarity=match['second_similarity']),
-                        margin=match['margin'], decision='verified_for_automatic_attendance' if verified else match['decision'],
-                        eligible_for_confirmation=bool(self._public_identities.get(match['best_candidate'])) and not outside,
+                        margin=match['margin'], verified=verified, verification_reasons=reasons,
+                        candidate_student_id=person['id'] if person else None,
+                        decision='verified' if verified else 'rejected',
+                        eligible_for_confirmation=bool(verified and not outside),
                         outside_class=outside,
-                        identity_confirmed=verified, label='Đã xác minh' if verified else 'Ứng viên chưa xác nhận',
+                        identity_confirmed=verified, label='Đã xác minh' if verified else 'Không xác định',
                         manual_review_required=not verified))
                 except Exception:
                     errors += 1
@@ -366,7 +379,7 @@ class RecognitionEngine:
             return dict(faces=public_faces, detected_faces=len(faces), face_errors=errors,
                         frame=dict(width=width, height=height), processing_ms=elapsed,
                         profile=profile, experimental=PROFILES.get(profile,{}).get('experimental',False),timings_ms=timings,
-                        threshold_enabled=bool(self.matcher.policy and self.matcher.policy.get('enabled')) and not PROFILES.get(profile,{}).get('experimental',False),
+                        threshold_enabled=self.verification_policy.valid and not self.verification_policy.profile_reasons(profile),
                         identity_confirmation_enabled=False, attendance_enabled=False)
         finally:
             self._guard.release()

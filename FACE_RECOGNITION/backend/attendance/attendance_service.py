@@ -68,7 +68,12 @@ class AttendanceService:
     def context(self,identity):
         with self.store.connection() as db:
             session=self.session(db,self.identity(identity),True)
-            session['student_ids']=[r[0] for r in db.execute('SELECT student_id FROM attendance_records WHERE session_id=?',(identity,))]
+            # Allowed = session snapshot AND current class enrollment AND not deleted.
+            # Matched strictly by numeric student_id, never by name.
+            session['student_ids']=[r[0] for r in db.execute('''SELECT r.student_id FROM attendance_records r
+                JOIN class_students m ON m.student_id=r.student_id AND m.class_id=?
+                JOIN students s ON s.id=r.student_id AND s.deleted_at IS NULL
+                WHERE r.session_id=?''',(session['class_id'],identity))]
             return session
 
     def create(self,data):
@@ -172,6 +177,32 @@ class AttendanceService:
                     db.execute('INSERT INTO attendance_auto_audit(record_id,similarity,margin,created_at) VALUES (?,?,?,?)',(r['id'],scores.get('similarity'),scores.get('margin'),stamp))
                     changed+=1
         return dict(enabled=True,changed=bool(changed),session=self.detail(identity))
+
+    def confirm_auto(self,identity,student_id,similarity,margin,still_valid):
+        """Internal only (called by the camera route after backend classification).
+
+        Writes PRESENT exactly once: the UPDATE only touches a row whose status is
+        still NULL, inside BEGIN IMMEDIATE, so two near-simultaneous requests or a
+        teacher's manual status can never be overwritten or duplicated.
+        Returns dict(changed, saved, reason).
+        """
+        self.identity(identity);self.identity(student_id,'Sinh viên')
+        with self.store.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            session=self.session(db,identity)
+            if session['status']!='IN_PROGRESS':return dict(changed=False,saved=False,reason='session_closed')
+            record=db.execute('SELECT * FROM attendance_records WHERE session_id=? AND student_id=?',(identity,student_id)).fetchone()
+            member=db.execute('SELECT 1 FROM class_students m JOIN students s ON s.id=m.student_id WHERE m.class_id=? AND s.id=? AND s.deleted_at IS NULL',(session['class_id'],student_id)).fetchone()
+            if not record or not member:return dict(changed=False,saved=False,reason='student_not_in_class')
+            if record['attendance_status'] is not None:
+                return dict(changed=False,saved=record['attendance_status']=='PRESENT',reason='already_recorded')
+            if not still_valid():return dict(changed=False,saved=False,reason='stale_or_track_lost')
+            stamp=now()
+            cursor=db.execute("UPDATE attendance_records SET attendance_status='PRESENT',recognition_source='AI_VERIFIED',source='auto',similarity=?,margin=?,confirmed_at=?,updated_at=? WHERE id=? AND attendance_status IS NULL",
+                (similarity,margin,stamp,stamp,record['id']))
+            if cursor.rowcount!=1:return dict(changed=False,saved=False,reason='concurrent_write')
+            db.execute('INSERT INTO attendance_auto_audit(record_id,similarity,margin,created_at) VALUES (?,?,?,?)',(record['id'],similarity,margin,stamp))
+        return dict(changed=True,saved=True,reason='saved')
 
     def edit(self,identity,student_id,data):
         if not isinstance(data,dict) or data.get('attendance_status') not in ('PRESENT','ABSENT') or data.get('confirmed') is not True:raise DomainError('Cần xác nhận trạng thái Có mặt/Vắng mặt hợp lệ.')

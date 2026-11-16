@@ -154,11 +154,16 @@ class ClassGallery(unittest.TestCase):
             engine.pipeline=Pipeline()
             import numpy as np
             frame=np.zeros((100,100,3),dtype=np.uint8)
-            one=engine.analyze(frame,allowed_student_ids=[rows[0]['student_id']])['faces'][0]
-            self.assertIsNotNone(one['top2']['candidate']);self.assertNotEqual(one['top1']['candidate'],one['top2']['candidate']);self.assertTrue(one['eligible_for_confirmation']);self.assertFalse(one['identity_confirmed'])
-            outside=engine.analyze(frame,allowed_student_ids=[rows[1]['student_id']])['faces'][0]
+            calibrated='retinaface_scaled_experimental'
+            one=engine.analyze(frame,profile=calibrated,allowed_student_ids=[rows[0]['student_id']])['faces'][0]
+            self.assertIsNotNone(one['top2']['candidate']);self.assertNotEqual(one['top1']['candidate'],one['top2']['candidate'])
+            # A registered vector matches itself: passes similarity+margin on the calibrated profile.
+            self.assertTrue(one['verified']);self.assertTrue(one['eligible_for_confirmation']);self.assertEqual(one['candidate_student_id'],rows[0]['student_id'])
+            # Same face on an uncalibrated profile is never verified.
+            self.assertFalse(engine.analyze(frame,allowed_student_ids=[rows[0]['student_id']])['faces'][0]['verified'])
+            outside=engine.analyze(frame,profile=calibrated,allowed_student_ids=[rows[1]['student_id']])['faces'][0]
             self.assertTrue(outside['outside_class']);self.assertFalse(outside['eligible_for_confirmation'])
-            empty=engine.analyze(frame,allowed_student_ids=[])['faces'][0]
+            empty=engine.analyze(frame,profile=calibrated,allowed_student_ids=[])['faces'][0]
             self.assertEqual(empty['top1'],one['top1']);self.assertTrue(empty['outside_class']);self.assertFalse(empty['eligible_for_confirmation'])
 
 

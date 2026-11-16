@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "_note": "Chính sách xác minh + điểm danh tự động theo lớp. Backend là nơi quyết định duy nhất. Không hạ ngưỡng ở đây để 'cho qua' test.",
+  "verification": {
+    "_note": "Ngưỡng lấy NGUYÊN VẸN từ điểm hiệu chỉnh đã có (outputs/test_labeling/verification_analysis/proposed_threshold.json, label_revision 38): 22 mặt đã biết + 30 mặt người lạ, 0 nhận nhầm người lạ, 0 nhận sai danh tính, 10/22 mặt đã biết bị từ chối. Đây là hiệu chỉnh, CHƯA phải đánh giá độc lập.",
+    "min_similarity": 0.533511788286182,
+    "min_margin": 0.17386882414194063,
+    "acceptance_rule": "best_similarity >= min_similarity AND margin(top1 - top2, hai danh tính khác nhau, toàn bộ gallery) >= min_margin",
+    "calibrated_profile": "retinaface_scaled_experimental",
+    "model_signature": "099a6319ad867dfabd3a1c8df5c6bba98f3d3c19e9335afe4c9654671799d582",
+    "calibration_pipeline_signature": "9dcce519599079536ca15e4f7166f052e336883781857942971fd8ee20e2e5b6",
+    "calibration_source": "outputs/test_labeling/verification_analysis/proposed_threshold.json",
+    "calibration_source_sha256": "26a6da13ed7e25c26a11e9ebee10aa7ad082bbc23042cb286256b1f6b7824b1a"
+  },
+  "stability": {
+    "_note": "Giữ nguyên chính sách hiện có (backend/attendance/stability.py): >= 5 trong 7 kết quả ArcFace liên tiếp của cùng một server track phải cùng sinh viên IN_CLASS. Mỗi request ArcFace chỉ đếm 1 lần.",
+    "required_consistent_results": 5,
+    "window": 7
+  },
+  "freshness": {
+    "_note": "result_max_age_s: tuổi tối đa của kết quả ArcFace (tính từ lúc suy luận xong) khi dùng để ghi. track_max_gap_s: khoảng tối đa giữa hai lần thấy khuôn mặt (khung nhanh YuNet) để coi là cùng một người.",
+    "result_max_age_s": 2.0,
+    "track_max_gap_s": 2.5
+  },
+  "automatic": {
+    "_note": "Auto chỉ chạy khi giảng viên bật (nút trên trang điểm danh) VÀ mọi điều kiện an toàn đạt. require_independent_evaluation=true sẽ khóa auto cho tới khi có outputs/automatic_attendance_evaluation.json hợp lệ (luồng verification_workflow cũ). require_calibrated_gallery=true khóa auto nếu gallery đã đổi sau hiệu chỉnh (cần hiệu chỉnh lại).",
+    "require_independent_evaluation": false,
+    "require_calibrated_gallery": true
+  }
+}
