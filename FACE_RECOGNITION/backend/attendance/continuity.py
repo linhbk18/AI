@@ -57,9 +57,9 @@ class Continuity:
         return [dict(id=t['id'],box=t['box'],signature=self.signature(image,t['box']),captured_at=at)
             for t in self.tracks if 0<=at-t['at']<2.5 and self.difference(self.signature(image,t['box']),t['signature'])<.065]
 
-    def valid(self,saved,now):
+    def valid(self,saved,now,max_gap=2.5):
         current=next((t for t in self.tracks if t['id']==saved['id']),None)
-        return bool(current and 0<=now-current['at']<2.5 and 0<=now-saved['captured_at']<=30
+        return bool(current and 0<=now-current['at']<max_gap and 0<=now-saved['captured_at']<=30
             and self.difference(saved['signature'],current['signature'])<.065)
 
     def bind(self,faces,frame,snapshot,now):

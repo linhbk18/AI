@@ -88,7 +88,7 @@ class CameraAPIContract(unittest.TestCase):
         result = self.post()
         self.assertEqual(result.status_code, 200)
         self.assertEqual(result.json['faces'], [])
-        self.assertFalse(result.json['attendance_enabled'])
+        self.assertNotIn('automatic_attendance', result.json)
         self.assertEqual(result.headers['Cache-Control'], 'no-store')
         self.assertIn('serialization_ms;dur=',result.headers['Server-Timing'])
         self.assertIn('decode_ms',result.json['timings_ms'])
@@ -142,8 +142,10 @@ class CameraAPIContract(unittest.TestCase):
         self.engine.result.update(faces=faces, detected_faces=2)
         result = self.post().json
         self.assertEqual(len(result['faces']), 2)
-        self.assertTrue(all(not f['identity_confirmed'] for f in result['faces']))
+        # Unverified faces: status UNKNOWN, label 'Không xác định', no name leaks.
+        self.assertTrue(all(f['status']=='UNKNOWN' and f['label']=='Không xác định' and f['student'] is None for f in result['faces']))
         self.assertNotIn('embedding', json.dumps(result))
+        self.assertNotIn('"A"', json.dumps(result));self.assertNotIn('Other', json.dumps(result))
     def test_rejects_missing_token_cross_origin_and_stopped_session(self):
         self.assertEqual(self.client.post('/api/camera/sessions').status_code, 403)
         headers = dict(self.headers, Origin='http://other.example')

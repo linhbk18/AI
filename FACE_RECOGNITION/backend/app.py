@@ -4,6 +4,7 @@ import json
 import hashlib
 import logging
 import secrets
+import sqlite3
 from time import perf_counter
 import threading
 import time
@@ -20,10 +21,10 @@ from .enrollment_routes import enrollment_blueprint
 from .attendance.attendance_service import AttendanceService
 from .attendance.automatic import AutomaticAttendance
 from .attendance.continuity import Continuity
-from .attendance.stability import observe, REQUIRED, WINDOW
+from .attendance.stability import observe
+from .attendance.classification import classify, public_face, IN_CLASS
 from .media import media_blueprint
 from .test_labeling import labeling_blueprint
-from .face_recognition.results import normalize_faces
 from .attendance.routes import attendance_blueprint
 from .database.db import DomainError
 from .face_recognition.runtime_service import (
@@ -50,6 +51,11 @@ def create_app(engine=None, start_models=True, overrides=None):
         app.config.update(overrides)
     service = engine if engine is not None else RecognitionEngine()
     app.extensions['face_engine'] = service
+    if getattr(service,'verification_policy',None) is None:
+        # Test doubles / engines without a loaded policy: read the same config file
+        # (or an override). RecognitionEngine loads and model-checks it itself.
+        from .face_recognition.verification_policy import VerificationPolicy, POLICY_PATH
+        service.verification_policy=VerificationPolicy.load(app.config.get('ATTENDANCE_POLICY_PATH',POLICY_PATH))
     sessions = {}
     sessions_guard = threading.Lock()
     token = secrets.token_urlsafe(32)
@@ -59,7 +65,6 @@ def create_app(engine=None, start_models=True, overrides=None):
     attendance=AttendanceService(store)
     app.extensions['attendance_service']=attendance
     automatic=AutomaticAttendance(attendance,app.config['AUTO_ATTENDANCE_ENABLED'],app.config['AUTO_ATTENDANCE_EVIDENCE'],app.config['AUTO_ATTENDANCE_ACTIVATION'])
-    service.automatic_verifier=automatic
     if hasattr(service,'configure_store'):
         service.configure_store(store)
     app.register_blueprint(management_blueprint(store,service,token))
@@ -123,27 +128,26 @@ def create_app(engine=None, start_models=True, overrides=None):
                        manual_attendance_enabled=True,code_reload_required=reload_required,
                        loaded_source_fingerprint=loaded_source_fingerprint,**model)
 
-    def automation_status(profile=None):
+    DEFAULT_PROFILE='retinaface_scaled_experimental'
+    def legacy_policy():
         matcher=getattr(service,'matcher',None)
-        policy=getattr(matcher,'policy',None)
-        if policy is None:
-            try:policy=json.loads((ROOT/'outputs/recognition_threshold.json').read_text(encoding='utf-8'))
-            except (OSError,ValueError):policy=None
-        status=automatic.status(policy,getattr(matcher,'signature',None),profile or request.args.get('profile','retinaface_reuse'))
-        candidate=AutomaticAttendance(attendance,True,app.config['AUTO_ATTENDANCE_EVIDENCE'])
-        available=candidate.status(policy,getattr(matcher,'signature',None),status['profile'])
-        status['can_enable']=available['ready'] and matcher is not None and matcher.policy is not None
-        status['enable_blocking_reasons']=available['blocking_reasons']
-        status['enable_message']=available['message']
-        status['required_consistent_results']=REQUIRED
-        status['consistency_window']=WINDOW
-        if matcher is not None and getattr(matcher,'policy',None) is None:
-            status['ready']=False;status['blocking_reasons'].append('policy_not_loaded_for_runtime_gallery')
-            status['message']+=' Policy chưa nạp cho gallery runtime; đánh giá đúng signature và khởi động lại Flask sau publish.'
+        if getattr(matcher,'policy',None) is not None:return matcher.policy
+        try:return json.loads((ROOT/'outputs/recognition_threshold.json').read_text(encoding='utf-8'))
+        except (OSError,ValueError):return None
+
+    def automation_status(profile=None):
+        if profile is None:
+            try:profile=request.args.get('profile',DEFAULT_PROFILE)
+            except RuntimeError:profile=DEFAULT_PROFILE
+        policy=getattr(service,'verification_policy',None)
+        matcher=getattr(service,'matcher',None)
+        status=automatic.readiness(policy,getattr(matcher,'signature',None),profile,
+                                   bool(service.health().get('ready')),legacy_policy())
         if source_fingerprint()!=loaded_source_fingerprint:
-            status['ready']=False;status['can_enable']=False
+            status.update(state='locked',ready=False,can_enable=False)
             status['blocking_reasons'].append('source_reload_required')
-            status['message']='Mã nguồn đã thay đổi hoặc đổi nhánh Git. Khởi động lại Flask trước khi dùng camera.'
+            status['message']='Tự động điểm danh: KHÓA – mã nguồn đã đổi, cần khởi động lại Flask.'
+        status['policy']=policy.public() if policy is not None else None
         return status
 
     @app.get('/api/attendance/automation-status')
@@ -154,19 +158,18 @@ def create_app(engine=None, start_models=True, overrides=None):
         data=request.get_json(silent=True)
         if not isinstance(data,dict) or type(data.get('enabled')) is not bool:
             return error('INVALID_MODE','enabled phải là true hoặc false.',400)
-        profile=data.get('profile','retinaface_scaled_experimental')
+        profile=data.get('profile',DEFAULT_PROFILE)
         if not isinstance(profile,str) or profile not in PROFILES:return error('UNKNOWN_PROFILE','Profile không hợp lệ.',400)
         with sessions_guard:
             status=automation_status(profile)
             if data['enabled'] and not status['can_enable']:
-                return jsonify(error=dict(code='AUTOMATION_LOCKED',message=status['enable_message']),status=status),409
-            matcher=getattr(service,'matcher',None)
-            activation=dict(enabled=data['enabled'],profile=profile)
-            if data['enabled']:
-                activation['policy_sha256']=hashlib.sha256(json.dumps(matcher.policy,sort_keys=True).encode()).hexdigest()
-            from .face_recognition.verification_workflow import write
-            write(app.config['AUTO_ATTENDANCE_ACTIVATION'],activation)
-            for s in sessions.values():s['pending_auto'].clear();s['verified_history'].clear()
+                return jsonify(error=dict(code='AUTOMATION_LOCKED',message=status['message']),status=status),409
+            activation=dict(enabled=data['enabled'],profile=profile,changed_at_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()))
+            if data['enabled']:activation['policy_sha256']=service.verification_policy.sha256
+            target=app.config['AUTO_ATTENDANCE_ACTIVATION']
+            target.parent.mkdir(parents=True,exist_ok=True)
+            temporary=target.with_suffix('.tmp');temporary.write_text(json.dumps(activation,indent=2),encoding='utf-8');temporary.replace(target)
+            for s in sessions.values():s['verified_history'].clear()
         return jsonify(automation_status(profile))
 
     @app.post('/api/camera/sessions')
@@ -209,9 +212,8 @@ def create_app(engine=None, start_models=True, overrides=None):
             if sum(not s['cancelled'].is_set() for s in sessions.values()) >= 4:
                 return error('SESSION_LIMIT', 'Đang có quá nhiều phiên camera. Hãy tắt phiên cũ.', 429)
             session_id = secrets.token_urlsafe(24)
-            sessions[session_id] = dict(cancelled=threading.Event(), last_seen=now,profile=profile,attendance_id=attendance_id,class_id=requested_class,
-                allowed_student_ids=allowed_student_ids,
-                continuity=Continuity(),sequence=0,pending_auto={},verified_history={})
+            sessions[session_id] = dict(cancelled=threading.Event(), last_seen=now,profile=profile,attendance_id=attendance_id,
+                continuity=Continuity(),sequence=0,verified_history={})
         return jsonify(session_id=session_id,profile=profile)
 
     @app.delete('/api/camera/sessions/<session_id>')
@@ -222,25 +224,84 @@ def create_app(engine=None, start_models=True, overrides=None):
             session['cancelled'].set()
         return jsonify(stopped=True, note='Không nhận khung mới; tác vụ native đang chạy sẽ kết thúc tại điểm hủy an toàn.')
 
-    @app.post('/api/camera/sessions/<session_id>/attendance/commit')
-    def commit_automatic(session_id):
-        data=request.get_json(silent=True) or {};ids=data.get('grant_ids') if isinstance(data,dict) else None
-        if not isinstance(ids,list) or not 1<=len(ids)<=50 or not all(isinstance(g,str) for g in ids):return error('INVALID_GRANTS','Danh sách xác minh không hợp lệ.',400)
+    def recognition_response(session,result,sequence,snapshot,received_at,inference_started,result_at):
+        """Classify every face on the BACKEND and auto-write PRESENT when allowed.
+
+        Pipeline: ArcFace global top-1/top-2 -> similarity+margin policy -> numeric
+        student_id -> enrollment of the open session's class (fresh SQLite read
+        AFTER inference) -> current-track binding -> 5-of-7 stability -> write.
+        The raw internal face records never leave this function.
+        """
+        policy=service.verification_policy
+        max_age=policy.result_max_age_s if policy.valid else 0
+        max_gap=policy.track_max_gap_s if policy.valid else 0
+        attendance_id=session.get('attendance_id')
+        context=attendance.context(attendance_id) if attendance_id is not None else None
+        roster=set(context['student_ids']) if context else None
+        auto=automation_status(session['profile']) if context else None
+        raw=result['faces']
         with sessions_guard:
-            session=sessions.get(session_id)
-            if not session or session['cancelled'].is_set():return error('SESSION_STOPPED','Camera đã tắt.',409)
-            if not automation_status(session['profile'])['ready']:return error('AUTOMATION_LOCKED','Chưa đủ bằng chứng bật tự động.',409)
-            grants=[session['pending_auto'].get(g) for g in set(ids)]
-            def continuous():
-                now=time.monotonic();matcher=getattr(service,'matcher',None)
-                return bool(automatic.requested and store.gallery_revision()==getattr(service,'_gallery_revision',None) and grants and all(g and g['sequence']==session['sequence'] and now-g['created_at']<3
-                    and g['signature']==getattr(matcher,'signature',None) and g['policy']==json.dumps(matcher.policy,sort_keys=True)
-                    and session['continuity'].valid(g['track'],now) for g in grants))
-            if not continuous():return error('STALE_TRACK','Khuôn mặt đã đổi hoặc kết quả cũ; không ghi điểm danh.',409)
-            result=automatic.apply(session['attendance_id'],[g['face'] for g in grants],session['cancelled'].is_set,
-                min(g['track']['captured_at'] for g in grants),continuous)
-            for key in ids:session['pending_auto'].pop(key,None)
-        return jsonify(result)
+            linked=session['continuity'].bind(raw,result['frame'],snapshot,time.monotonic())
+            for face,saved in zip(raw,linked):
+                if saved and not session['continuity'].valid(saved,time.monotonic(),max_gap):
+                    face['tracking']=dict(valid=False,server_track_id=None)
+            current=sequence==session['sequence']
+            history={};plans=[]
+            for face,saved in zip(raw,linked):
+                track_valid=bool(saved and current and face['tracking'].get('valid'))
+                status=classify(face,roster,context is not None and context['status']=='IN_PROGRESS',track_valid,context is not None)
+                consistency=None
+                if context is not None and track_valid:
+                    student_id=face['candidate_student_id'] if status==IN_CLASS else None
+                    state,consistency=observe(session['verified_history'].get(saved['id'],{}),student_id,sequence,policy.required or 5,policy.window or 7)
+                    history[saved['id']]=state
+                plans.append((face,saved,status,consistency))
+            if current and context is not None:session['verified_history']=history
+        public=[];changed=False;errors=[]
+        for face,saved,status,consistency in plans:
+            entry=dict(verification_consistency=consistency) if context is not None else {}
+            if status==IN_CLASS and auto and auto['ready'] and consistency and consistency['ready']:
+                def still_valid(saved=saved):
+                    with sessions_guard:
+                        return bool(not session['cancelled'].is_set() and sequence==session['sequence']
+                            and time.monotonic()-result_at<=max_age
+                            and session['continuity'].valid(saved,time.monotonic(),max_gap))
+                try:
+                    outcome=attendance.confirm_auto(attendance_id,face['candidate_student_id'],
+                        float(face['top1']['similarity']),float(face['margin']),still_valid)
+                except sqlite3.Error:
+                    app.logger.exception('Automatic attendance write failed')
+                    outcome=dict(changed=False,saved=False,reason='database_write_failed')
+                    errors.append('database_write_failed')
+                changed=changed or outcome['changed']
+                entry['auto_write']=outcome
+            public.append((face,status,entry))
+        detail=None
+        if context is not None:
+            try:detail=attendance.detail(attendance_id)
+            except sqlite3.Error:errors.append('database_read_failed')
+        records={r['student_id']:r['attendance_status'] for r in detail['records']} if detail else {}
+        faces=[]
+        for face,status,entry in public:
+            if context is not None and status==IN_CLASS:
+                saved_status=records.get(face['candidate_student_id']) if detail else None
+                entry['attendance']=dict(status=saved_status or 'PENDING',saved=saved_status=='PRESENT',
+                    label='Đã điểm danh' if saved_status=='PRESENT' else 'Chờ xác nhận')
+            faces.append(public_face(face,status,**entry))
+        response=dict(faces=faces,detected_faces=result.get('detected_faces',len(faces)),face_errors=result.get('face_errors',0),
+            frame=result['frame'],processing_ms=result.get('processing_ms'),profile=result.get('profile',session['profile']),
+            experimental=result.get('experimental'),timings_ms=result.get('timings_ms',{}),request_id=sequence,
+            attendance_session_id=attendance_id,class_id=context['class_id'] if context else None,
+            result_meta=dict(request_id=sequence,attendance_session_id=attendance_id,class_id=context['class_id'] if context else None,
+                server_result_epoch_ms=time.time()*1000,max_result_age_s=max_age),
+            frame_timing=dict(server_received_at=received_at,inference_started_at=inference_started,result_at=result_at,
+                client_captured_ms=request.headers.get('X-Client-Captured-Ms')))
+        if context is not None:
+            response['automatic_attendance']=dict(status=auto,enabled=bool(auto and auto['ready']),changed=changed,
+                errors=errors,pending_consistency=any(f['status']==IN_CLASS and not (f.get('verification_consistency') or {}).get('ready') for f in faces))
+            if detail is not None:response['attendance_session']=dict(id=detail['id'],status=detail['status'],stats=detail['stats'])
+            if changed and detail is not None:response['automatic_attendance']['session']=detail
+        return response
 
     @app.post('/api/recognize')
     @app.post('/api/detect')
@@ -256,17 +317,9 @@ def create_app(engine=None, start_models=True, overrides=None):
         if not session or session['cancelled'].is_set():
             return error('SESSION_STOPPED', 'Camera đã tắt hoặc phiên đã hết hạn.', 409)
         try:attendance_context=attendance.context(session['attendance_id']) if session.get('attendance_id') is not None else None
-        except DomainError as exc:return error('ATTENDANCE_SESSION_INVALID',str(exc),exc.status)
-        frame_class_id=None
-        if session.get('class_id') is not None:
-            supplied_class=request.args.get('class_id') or request.headers.get('X-Class-Id')
-            try:frame_class_id=attendance.identity(int(supplied_class),'Lớp')
-            except (TypeError,ValueError,DomainError):
-                return error('CLASS_SCOPE_MISMATCH','Khung hình phải gửi class_id hợp lệ của phiên camera.',409)
-            if frame_class_id!=session['class_id']:
-                return error('CLASS_SCOPE_MISMATCH','Lớp của khung hình không khớp với phiên camera.',409)
-            try:allowed_student_ids=store.class_student_ids(frame_class_id)
-            except DomainError as exc:return error('INVALID_CLASS_SCOPE',str(exc),exc.status)
+        except sqlite3.Error:
+            app.logger.exception('SQLite unavailable before recognition')
+            return error('DATABASE_UNAVAILABLE','Không đọc được SQLite. Không ghi điểm danh; kiểm tra file dữ liệu rồi thử lại.',503)
         if request.mimetype != 'image/jpeg':
             return error('JPEG_REQUIRED', 'Khung hình phải có định dạng JPEG.', 415)
         raw = request.stream.read(1024*1024+1)
@@ -289,7 +342,7 @@ def create_app(engine=None, start_models=True, overrides=None):
         try:
             with sessions_guard:
                 if not preview:
-                    session['sequence']+=1;sequence=session['sequence'];session['pending_auto'].clear()
+                    session['sequence']+=1;sequence=session['sequence']
                     snapshot=session['continuity'].snapshot(bgr,received_at)
             kwargs=dict(profile=session['profile'])
             inference_started=time.monotonic()
@@ -298,51 +351,14 @@ def create_app(engine=None, start_models=True, overrides=None):
                 kwargs['class_id']=frame_class_id
             result = (service.detect_preview(bgr,session['cancelled'].is_set) if preview else
                       service.analyze(bgr, session['cancelled'].is_set,**kwargs))
-            if attendance_context is not None:
-                attendance.context(session['attendance_id'])
-                result['attendance_session_id']=session['attendance_id']
+            result_at=time.monotonic()
             if session['cancelled'].is_set():
                 raise SessionStopped()
-            with sessions_guard:
-                if preview:session['continuity'].update(result['faces'],result['frame'],bgr,received_at)
-                else:
-                    result['request_id']=sequence
-                    result['frame_timing']=dict(server_received_at=received_at,inference_started_at=inference_started,result_at=time.monotonic(),
-                        client_captured_ms=request.headers.get('X-Client-Captured-Ms'))
-                    linked=session['continuity'].bind(result['faces'],result['frame'],snapshot,time.monotonic())
-            if not preview and attendance_context is not None:
-                with sessions_guard:
-                    grants=[];current_history={};pending_consistency=False
-                    for face,saved in zip(result['faces'],linked):
-                        frame_verified=face.get('identity_confirmed') is True
-                        face['identity_confirmed']=False
-                        if saved and sequence==session['sequence']:
-                            student_id=face.get('top1',{}).get('student',{}).get('id') if frame_verified else None
-                            state,consistency=observe(session['verified_history'].get(saved['id'],{}),student_id,sequence)
-                            current_history[saved['id']]=state
-                            face['verification_consistency']=consistency
-                            face['identity_confirmed']=consistency['ready']
-                            if not consistency['ready']:
-                                pending_consistency=True;continue
-                            if face.get('outside_class') or not face.get('eligible_for_confirmation'):continue
-                            grant=secrets.token_urlsafe(32)
-                            session['pending_auto'][grant]=dict(face=face,track=saved,sequence=sequence,created_at=time.monotonic(),
-                                signature=getattr(service.matcher,'signature',None),policy=json.dumps(service.matcher.policy,sort_keys=True))
-                            grants.append(dict(grant_id=grant,face_id=face['face_id'],server_track_id=saved['id']))
-                    if sequence==session['sequence']:session['verified_history']=current_history
-                    result['automatic_attendance']=dict(enabled=automation_status(session['profile'])['ready'],changed=False,grants=grants,
-                        pending_consistency=pending_consistency,
-                        reason='awaiting_current_track_commit' if grants else 'no_verified_current_face')
-                result['attendance_enabled']=result['automatic_attendance']['enabled']
-                result['identity_confirmation_enabled']=any(f.get('identity_confirmed') is True for f in result['faces'])
-                result['automatic_attendance']['status']=automation_status(session['profile'])
+            if preview:
+                with sessions_guard:session['continuity'].update(result['faces'],result['frame'],bgr,received_at)
+            else:
+                result=recognition_response(session,result,sequence,snapshot,received_at,inference_started,result_at)
             result.setdefault('timings_ms',{})['decode_ms']=decode_ms
-            records=attendance.detail(session['attendance_id'])['records'] if attendance_context else []
-            result['recognition_results']=normalize_faces(result['faces'],'live_camera',records)
-            for public,face in zip(result['recognition_results'],result['faces']):
-                public['auto_attendance_eligible']=bool(face.get('identity_confirmed') and face.get('tracking',{}).get('valid') and face.get('verification_consistency',{}).get('ready') and not face.get('outside_class') and result.get('attendance_enabled'))
-                public['presence_verified']=public['auto_attendance_eligible']
-                public['presence_verification_method']='server_track_continuity_not_anti_spoofing' if public['presence_verified'] else None
             serialize_start=perf_counter()
             response=jsonify(result)
             serialization_ms=(perf_counter()-serialize_start)*1000
@@ -356,6 +372,9 @@ def create_app(engine=None, start_models=True, overrides=None):
             return response, status
         except DomainError:
             raise
+        except sqlite3.Error:
+            app.logger.exception('SQLite unavailable during recognition')
+            return error('DATABASE_UNAVAILABLE','Không đọc/ghi được SQLite. Chưa ghi điểm danh; kết quả này bị bỏ.',503)
         except EngineUnavailable:
             return error('MODEL_NOT_READY', 'Mô hình chưa sẵn sàng.', 503)
         except SessionStopped:
