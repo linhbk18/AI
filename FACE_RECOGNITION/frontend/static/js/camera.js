@@ -39,7 +39,7 @@
     message("Đang mở camera và khởi tạo phiên xử lý…");
     try{
       startController=new AbortController();const controller=startController;const timer=setTimeout(()=>controller.abort(),10000);
-      const options={profile:profile.value};if(window.attendanceBridge)options.attendance_session_id=window.attendanceBridge.getSessionId();
+      const options={profile:profile.value};if(window.attendanceBridge){options.attendance_session_id=window.attendanceBridge.getSessionId();options.class_id=window.attendanceBridge.getClassId();}
       let response;try{response=await fetch("/api/camera/sessions",{method:"POST",headers:{...token(),"Content-Type":"application/json"},body:JSON.stringify(options),signal:controller.signal});}finally{clearTimeout(timer);startController=null;}
       const data=await response.json();if(!response.ok)throw new Error(data.error?.message||"Không tạo được phiên camera.");
       if(epoch!==generation){await closeSession(data.session_id);return;}session=data.session_id;
@@ -53,6 +53,7 @@
       message("Đang phát hiện vị trí khuôn mặt. Danh tính sẽ được phân tích bằng RetinaFace + ArcFace.");
       animate();schedulePreview(epoch,0);scheduleIdentity(epoch,250);
     }catch(error){
+      console.error("Chi tiết lỗi:", error);
       if(epoch!==generation)return;
       const text=error.name==="NotAllowedError"?"Quyền camera đã bị từ chối. Hãy cho phép camera trong cài đặt website.":error.name==="NotReadableError"?"Không mở được camera. Kiểm tra ứng dụng khác đang sử dụng thiết bị.":error.message;
       await stop(text||"Không thể mở camera.","error");
@@ -72,7 +73,9 @@
   async function requestFrame(endpoint,captured,controller,timeoutMs){
     const timer=setTimeout(()=>controller.abort(),timeoutMs),began=performance.now();
     try{
-      const response=await fetch(endpoint,{method:"POST",body:captured.blob,headers:{...token(),"Content-Type":"image/jpeg","X-Camera-Session":session,"X-Client-Captured-Ms":String(captured.began)},signal:controller.signal});
+      const headers={...token(),"Content-Type":"image/jpeg","X-Camera-Session":session,"X-Client-Captured-Ms":String(captured.began)};const classId=window.attendanceBridge?.getClassId?.();if(classId)headers["X-Class-Id"]=String(classId);
+      const frameUrl=classId?endpoint+"?class_id="+encodeURIComponent(classId):endpoint;
+      const response=await fetch(frameUrl,{method:"POST",body:captured.blob,headers,signal:controller.signal});
       let data;try{data=await response.json();}catch{throw new Error('Backend trả phản hồi không hợp lệ. Kiểm tra Terminal và thử lại.');}if(!response.ok){const error=new Error(data.error?.message||"Backend xử lý thất bại.");error.status=response.status;throw error;}
       if(!Array.isArray(data.faces)||data.frame?.width!==captured.canvas.width||data.frame?.height!==captured.canvas.height)throw new Error("Kết quả backend không khớp khung hình.");
       const http_ms=performance.now()-began,stages={};

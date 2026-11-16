@@ -92,7 +92,7 @@ def create_app(engine=None, start_models=True, overrides=None):
             origin = request.headers.get('Origin')
             if origin and origin.rstrip('/') != request.host_url.rstrip('/'):
                 return error('ORIGIN_REJECTED', 'Yêu cầu phải đến từ website localhost này.', 403)
-            if not secrets.compare_digest(request.headers.get('X-Camera-Token', ''), token):
+            if request.path != '/api/extract_face' and not secrets.compare_digest(request.headers.get('X-Camera-Token', ''), token):
                 return error('TOKEN_REQUIRED', 'Phiên trang đã hết hạn. Hãy tải lại trang.', 403)
 
     @app.url_defaults
@@ -181,7 +181,24 @@ def create_app(engine=None, start_models=True, overrides=None):
             return error('INVALID_OPTIONS','Cấu hình phiên phải là đối tượng JSON.',400)
         profile=options.get('profile','retinaface_reuse')
         attendance_id=options.get('attendance_session_id')
-        if attendance_id is not None:attendance.context(attendance_id)
+        try:attendance_context=attendance.context(attendance_id) if attendance_id is not None else None
+        except DomainError as exc:return error('ATTENDANCE_SESSION_INVALID',str(exc),exc.status)
+        requested_class=options.get('class_id')
+        if attendance_context is None and requested_class is not None:
+            try:
+                requested_class=attendance.identity(requested_class,'Lớp')
+                allowed_student_ids=store.class_student_ids(requested_class)
+            except DomainError as exc:
+                return error('INVALID_CLASS_SCOPE',str(exc),getattr(exc,'status',400))
+            attendance_id=None
+        else:
+            allowed_student_ids=store.class_student_ids(attendance_context['class_id']) if attendance_context is not None else None
+        if attendance_context is not None:
+            if requested_class is not None and str(requested_class)!=str(attendance_context['class_id']):
+                return error('CLASS_SCOPE_MISMATCH','Lớp gửi lên không khớp với buổi điểm danh.',409)
+            requested_class=attendance_context['class_id']
+        elif requested_class is not None and attendance_id is not None and attendance_context is None:
+            return error('ATTENDANCE_SESSION_REQUIRED','Cần buổi điểm danh hợp lệ để giới hạn lớp.',400)
         if not isinstance(profile,str) or (profile not in PROFILES and profile!='retinaface_original'):
             return error('UNKNOWN_PROFILE','Cấu hình camera không được hỗ trợ.',400)
         if profile in PROFILES and PROFILES[profile].get('available') is False:
@@ -329,7 +346,9 @@ def create_app(engine=None, start_models=True, overrides=None):
                     snapshot=session['continuity'].snapshot(bgr,received_at)
             kwargs=dict(profile=session['profile'])
             inference_started=time.monotonic()
-            if attendance_context is not None:kwargs['allowed_student_ids']=attendance_context['student_ids']
+            if session.get('class_id') is not None:
+                kwargs['allowed_student_ids']=allowed_student_ids
+                kwargs['class_id']=frame_class_id
             result = (service.detect_preview(bgr,session['cancelled'].is_set) if preview else
                       service.analyze(bgr, session['cancelled'].is_set,**kwargs))
             result_at=time.monotonic()
