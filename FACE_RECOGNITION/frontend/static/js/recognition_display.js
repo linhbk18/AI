@@ -12,5 +12,11 @@
     }
     return {lines:['Gợi ý: '+person.full_name,person.student_code,'Chưa xác minh · không tự điểm danh'],name:'Gợi ý: '+person.full_name,code:person.student_code,verified:false};
   }
-  root.RecognitionDisplay={describe};
+  function canConfirmManually(face,record,active,sessionId){
+    const person=face?.top1?.student;
+    return !!(active?.status==='IN_PROGRESS'&&active.id===sessionId&&person&&record&&
+      record.student_id===person.id&&record.attendance_status!=='PRESENT'&&
+      !face.outside_class&&face.eligible_for_confirmation!==false);
+  }
+  root.RecognitionDisplay={describe,canConfirmManually};
 })(globalThis);
