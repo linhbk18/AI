@@ -149,8 +149,13 @@ class ManagementStore:
         if isinstance(student_id,bool) or not isinstance(student_id,int) or student_id<=0: raise DomainError('Mã hồ sơ sinh viên không hợp lệ.')
         with self.connection() as db:
             self.require(db,'classes',class_id);self.require(db,'students',student_id)
-            if remove: db.execute('DELETE FROM class_students WHERE class_id=? AND student_id=?',(class_id,student_id))
-            else: db.execute('INSERT INTO class_students(class_id,student_id) VALUES (?,?)',(class_id,student_id))
+            if remove:
+                changed=db.execute('DELETE FROM class_students WHERE class_id=? AND student_id=?',(class_id,student_id)).rowcount
+            else:
+                if db.execute('SELECT 1 FROM class_students WHERE class_id=? AND student_id=?',(class_id,student_id)).fetchone():
+                    raise DomainError('Mã hoặc liên kết đã tồn tại, hoặc dữ liệu còn được tham chiếu.',409)
+                changed=db.execute('INSERT INTO class_students(class_id,student_id) VALUES (?,?)',(class_id,student_id)).rowcount
+            if changed:self.bump(db)
 
     def legacy_options(self):
         with self.connection() as db: mapped={r['dataset_label']:r['student_id'] for r in db.execute('SELECT * FROM legacy_mappings')}
@@ -199,6 +204,77 @@ class ManagementStore:
                 (student_id,json.dumps(vector.tolist(),allow_nan=False),json.dumps(pipeline),image_sha256,stamp,stamp)).lastrowid
             self.bump(db)
             return identity
+
+    def student_code_exists(self,student_code):
+        code=text(student_code,'Mã sinh viên',64).upper()
+        with self.connection() as db:
+            return db.execute('SELECT 1 FROM students WHERE student_code=? COLLATE NOCASE AND deleted_at IS NULL',(code,)).fetchone() is not None
+
+    def create_student_with_embeddings(self,data,class_id,embeddings):
+        """Persist a confirmed student, class link and collected vectors in one SQLite transaction."""
+        if not isinstance(data,dict):raise DomainError('Thông tin sinh viên không hợp lệ.')
+        code=text(data.get('student_code'),'Mã sinh viên',64).upper()
+        name=text(data.get('full_name'),'Họ tên')
+        if not isinstance(embeddings,list) or not embeddings:raise DomainError('Chưa thu thập dữ liệu khuôn mặt.')
+        if len(embeddings)>60:raise DomainError('Số embedding vượt giới hạn cho phép.',422)
+        stamp=now();created=[]
+        for item in embeddings:
+            vector=np.asarray(item.get('embedding'),dtype=np.float64)
+            if vector.shape!=(512,) or not np.isfinite(vector).all() or np.linalg.norm(vector)==0:raise DomainError('Embedding ArcFace không hợp lệ.',422)
+            vector=vector/np.linalg.norm(vector)
+            posture=item.get('posture')
+            if posture not in ('thẳng','quay_trái','quay_phải','ngẩng_nhẹ','cúi_nhẹ'):raise DomainError('Nhãn tư thế không hợp lệ.',422)
+            pipeline=dict(item.get('pipeline') or {},posture=posture,model_name='ArcFace',detector_backend='retinaface',align=True,
+                normalization='base',embedding_dimension=512,enforce_detection=True,expand_percentage=0,anti_spoofing=False,
+                attribution='operator_confirmed_camera_enrollment')
+            created.append((vector.tolist(),json.dumps(pipeline,allow_nan=False)))
+        with self.connection() as db:
+            if db.execute('SELECT 1 FROM students WHERE student_code=? COLLATE NOCASE AND deleted_at IS NULL',(code,)).fetchone():
+                raise DomainError('Mã sinh viên đã tồn tại.',409)
+            if isinstance(class_id,bool) or not isinstance(class_id,int):raise DomainError('Hãy chọn lớp học.',422)
+            self.require(db,'classes',class_id)
+            student_id=db.execute('INSERT INTO students(student_code,full_name,created_at,updated_at) VALUES (?,?,?,?)',(code,name,stamp,stamp)).lastrowid
+            db.execute('INSERT INTO class_students(class_id,student_id) VALUES (?,?)',(class_id,student_id))
+            for vector,pipeline in created:
+                db.execute('INSERT INTO face_embeddings(student_id,embedding_json,pipeline_json,created_at,attribution_confirmed_at) VALUES (?,?,?,?,?)',
+                    (student_id,json.dumps(vector,allow_nan=False),pipeline,stamp,stamp))
+            self.bump(db)
+            return student_id
+
+    def rollback_created_student(self,student_id,class_id):
+        """Compensate only the just-created bundle when the runtime gallery cannot publish it."""
+        with self.connection() as db:
+            db.execute('DELETE FROM class_students WHERE class_id=? AND student_id=?',(class_id,student_id))
+            db.execute('DELETE FROM face_embeddings WHERE student_id=? AND embedding_json IS NOT NULL',(student_id,))
+            db.execute('DELETE FROM students WHERE id=? AND NOT EXISTS(SELECT 1 FROM face_embeddings WHERE student_id=?)',(student_id,student_id))
+            self.bump(db)
+
+    def replace_student_embeddings(self,student_id,embeddings):
+        """Replace only camera-enrolled vectors atomically; original linked vectors are immutable."""
+        with self.connection() as db:
+            self.require(db,'students',student_id)
+            old=[dict(row) for row in db.execute('SELECT * FROM face_embeddings WHERE student_id=? AND embedding_json IS NOT NULL',(student_id,))]
+            db.execute('DELETE FROM face_embeddings WHERE student_id=? AND embedding_json IS NOT NULL',(student_id,))
+            stamp=now()
+            for item in embeddings:
+                vector=np.asarray(item.get('embedding'),dtype=np.float64)
+                if vector.shape!=(512,) or not np.isfinite(vector).all() or np.linalg.norm(vector)==0:raise DomainError('Embedding ArcFace không hợp lệ.',422)
+                vector=vector/np.linalg.norm(vector);posture=item.get('posture')
+                if posture not in ('thẳng','quay_trái','quay_phải','ngẩng_nhẹ','cúi_nhẹ'):raise DomainError('Nhãn tư thế không hợp lệ.',422)
+                pipeline=dict(item.get('pipeline') or {},posture=posture,model_name='ArcFace',detector_backend='retinaface',align=True,
+                    normalization='base',embedding_dimension=512,attribution='operator_confirmed_camera_enrollment')
+                db.execute('INSERT INTO face_embeddings(student_id,embedding_json,pipeline_json,created_at,attribution_confirmed_at) VALUES (?,?,?,?,?)',
+                    (student_id,json.dumps(vector.tolist(),allow_nan=False),json.dumps(pipeline),stamp,stamp))
+            self.bump(db)
+            return old
+
+    def restore_student_embeddings(self,student_id,old_rows):
+        with self.connection() as db:
+            db.execute('DELETE FROM face_embeddings WHERE student_id=? AND embedding_json IS NOT NULL',(student_id,))
+            for row in old_rows:
+                db.execute('INSERT INTO face_embeddings(id,student_id,embedding_reference,embedding_json,pipeline_json,image_sha256,created_at,attribution_confirmed_at) VALUES (?,?,?,?,?,?,?,?)',
+                    (row['id'],row['student_id'],row['embedding_reference'],row['embedding_json'],row['pipeline_json'],row['image_sha256'],row['created_at'],row['attribution_confirmed_at']))
+            self.bump(db)
 
     def gallery_revision(self):
         with self.connection() as db: return db.execute("SELECT value FROM management_meta WHERE key='gallery_revision'").fetchone()[0]

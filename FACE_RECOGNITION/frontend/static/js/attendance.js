@@ -60,7 +60,7 @@
     filter.addEventListener('change',filterRoster);document.querySelector('.attendance-roster-card .card-heading').append(filter);
     classes=(await api('/api/classes')).items;$('attendance-class').innerHTML=options();
     $('session-date').value=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Ho_Chi_Minh',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
-    window.attendanceBridge={canStart:()=>active?.status==='IN_PROGRESS',getSessionId:()=>active?.status==='IN_PROGRESS'?active.id:null};
+    window.attendanceBridge={canStart:()=>active?.status==='IN_PROGRESS',getSessionId:()=>active?.status==='IN_PROGRESS'?active.id:null,getClassId:()=>active?.status==='IN_PROGRESS'?active.class_id:null};
     $('start-camera').disabled=true;
     window.addEventListener('attendance:auto',e=>{if(active?.id===e.detail.id){active=e.detail;renderRoster();notifySessionChange(active.id);notice('Đã cập nhật Có mặt từ kết quả điểm danh tự động đã lưu trong SQLite.');}});
     $('attendance-class').addEventListener('change',()=>safe(async()=>{

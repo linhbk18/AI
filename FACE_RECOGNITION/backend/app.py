@@ -149,7 +149,15 @@ def create_app(engine=None, start_models=True, overrides=None):
             return error('INVALID_OPTIONS','Cấu hình phiên phải là đối tượng JSON.',400)
         profile=options.get('profile','retinaface_reuse')
         attendance_id=options.get('attendance_session_id')
-        if attendance_id is not None:attendance.context(attendance_id)
+        try:attendance_context=attendance.context(attendance_id) if attendance_id is not None else None
+        except DomainError as exc:return error('ATTENDANCE_SESSION_INVALID',str(exc),exc.status)
+        requested_class=options.get('class_id')
+        if attendance_context is not None:
+            if requested_class is not None and str(requested_class)!=str(attendance_context['class_id']):
+                return error('CLASS_SCOPE_MISMATCH','Lớp gửi lên không khớp với buổi điểm danh.',409)
+            requested_class=attendance_context['class_id']
+        elif requested_class is not None:
+            return error('ATTENDANCE_SESSION_REQUIRED','Cần buổi điểm danh hợp lệ để giới hạn lớp.',400)
         if not isinstance(profile,str) or (profile not in PROFILES and profile!='retinaface_original'):
             return error('UNKNOWN_PROFILE','Cấu hình camera không được hỗ trợ.',400)
         if profile in PROFILES and PROFILES[profile].get('available') is False:
@@ -163,7 +171,7 @@ def create_app(engine=None, start_models=True, overrides=None):
             if sum(not s['cancelled'].is_set() for s in sessions.values()) >= 4:
                 return error('SESSION_LIMIT', 'Đang có quá nhiều phiên camera. Hãy tắt phiên cũ.', 429)
             session_id = secrets.token_urlsafe(24)
-            sessions[session_id] = dict(cancelled=threading.Event(), last_seen=now,profile=profile,attendance_id=attendance_id,
+            sessions[session_id] = dict(cancelled=threading.Event(), last_seen=now,profile=profile,attendance_id=attendance_id,class_id=requested_class,
                 continuity=Continuity(),sequence=0,pending_auto={},verified_history={})
         return jsonify(session_id=session_id,profile=profile)
 
@@ -208,7 +216,12 @@ def create_app(engine=None, start_models=True, overrides=None):
                 session['last_seen'] = time.monotonic()
         if not session or session['cancelled'].is_set():
             return error('SESSION_STOPPED', 'Camera đã tắt hoặc phiên đã hết hạn.', 409)
-        attendance_context=attendance.context(session['attendance_id']) if session.get('attendance_id') is not None else None
+        try:attendance_context=attendance.context(session['attendance_id']) if session.get('attendance_id') is not None else None
+        except DomainError as exc:return error('ATTENDANCE_SESSION_INVALID',str(exc),exc.status)
+        if attendance_context is not None:
+            supplied_class=request.headers.get('X-Class-Id')
+            if supplied_class!=str(session['class_id']):
+                return error('CLASS_SCOPE_MISMATCH','Lớp của khung hình không khớp với phiên camera.',409)
         if request.mimetype != 'image/jpeg':
             return error('JPEG_REQUIRED', 'Khung hình phải có định dạng JPEG.', 415)
         raw = request.stream.read(1024*1024+1)
@@ -235,7 +248,9 @@ def create_app(engine=None, start_models=True, overrides=None):
                     snapshot=session['continuity'].snapshot(bgr,received_at)
             kwargs=dict(profile=session['profile'])
             inference_started=time.monotonic()
-            if attendance_context is not None:kwargs['allowed_student_ids']=attendance_context['student_ids']
+            if attendance_context is not None:
+                kwargs['allowed_student_ids']=attendance_context['student_ids']
+                kwargs['class_id']=session['class_id']
             result = (service.detect_preview(bgr,session['cancelled'].is_set) if preview else
                       service.analyze(bgr, session['cancelled'].is_set,**kwargs))
             if attendance_context is not None:

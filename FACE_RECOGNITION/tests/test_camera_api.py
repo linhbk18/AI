@@ -31,7 +31,7 @@ class FakeEngine:
         return dict(ready=self.ready, state='ready' if self.ready else 'loading',
                     model_name='ArcFace', detector_backend='retinaface', registered_embeddings=92,
                     registered_students=5, identity_confirmation_enabled=False, attendance_enabled=False)
-    def analyze(self, bgr, cancelled,profile='retinaface_reuse'):
+    def analyze(self, bgr, cancelled,profile='retinaface_reuse',**kwargs):
         self.calls += 1
         if self.failure:
             raise self.failure
@@ -84,6 +84,22 @@ class CameraAPIContract(unittest.TestCase):
         self.assertEqual(self.client.post('/api/camera/sessions',headers=self.headers,json={'profile':'yunet_experimental'}).status_code,400)
         self.assertEqual(self.client.post('/api/camera/sessions',headers=self.headers,json={'profile':'unknown'}).status_code,400)
         self.assertEqual(self.client.post('/api/camera/sessions',headers=self.headers,json=[1]).status_code,400)
+    def test_attendance_camera_requires_matching_class_scope(self):
+        from backend.attendance.attendance_service import AttendanceService
+        store=self.app.extensions['management_store']
+        classroom=store.save('classes',dict(class_code='SCOPE',class_name='Scope test'))
+        student=store.save('students',dict(student_code='SCOPE-1',full_name='Test Student'))
+        store.membership(classroom['id'],student['id'])
+        attendance=self.app.extensions['attendance_service'].create(dict(class_id=classroom['id'],session_name='Scope',session_date='2026-11-16',request_key='scope-test'))
+        wrong=self.client.post('/api/camera/sessions',headers=self.headers,json={'attendance_session_id':attendance['id'],'class_id':classroom['id']+1})
+        self.assertEqual(wrong.status_code,409)
+        camera=self.client.post('/api/camera/sessions',headers=self.headers,json={'attendance_session_id':attendance['id'],'class_id':classroom['id']}).json['session_id']
+        headers=dict(self.headers,**{'X-Camera-Session':camera})
+        self.assertEqual(self.client.post('/api/recognize',data=jpeg(),content_type='image/jpeg',headers=headers).status_code,409)
+        headers['X-Class-Id']=str(classroom['id']+1)
+        self.assertEqual(self.client.post('/api/recognize',data=jpeg(),content_type='image/jpeg',headers=headers).status_code,409)
+        headers['X-Class-Id']=str(classroom['id'])
+        self.assertEqual(self.client.post('/api/recognize',data=jpeg(),content_type='image/jpeg',headers=headers).status_code,200)
     def test_multiple_faces_no_identity_confirmation(self):
         faces = [dict(face_id=i, box=dict(x=i*20,y=20,w=50,h=60),
                       top1=dict(candidate=name, similarity=.6), top2=dict(candidate='Other',similarity=.4),

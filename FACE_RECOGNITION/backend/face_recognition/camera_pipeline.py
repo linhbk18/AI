@@ -15,6 +15,15 @@ import numpy as np
 PROFILES=json.loads((Path(__file__).resolve().parents[1]/'camera_profiles.json').read_text(encoding='utf-8'))['profiles']
 
 
+class CameraFace:
+    """YuNet landmarks used for preview and transient enrollment quality checks."""
+    def __init__(self,x,y,w,h,right_eye,left_eye,nose_tip,right_mouth,left_mouth,confidence):
+        self.x,self.y,self.w,self.h=x,y,w,h
+        self.right_eye,self.left_eye=right_eye,left_eye
+        self.nose_tip,self.right_mouth,self.left_mouth=nose_tip,right_mouth,left_mouth
+        self.confidence=confidence
+
+
 class YuNetDetector:
     """OpenCV YuNet 2023mar: one detection call on the unpadded camera frame."""
     def __init__(self, path):
@@ -30,7 +39,6 @@ class YuNetDetector:
 
     def _detect_faces(self,image,dimension,score_threshold):
         import cv2
-        from deepface.models.Detector import FacialAreaRegion
         height,width=image.shape[:2]
         scale=dimension/max(height,width)
         size=(max(1,round(width*scale)),max(1,round(height*scale)))
@@ -42,8 +50,9 @@ class YuNetDetector:
         if faces is None: return result
         sx,sy=size[0]/width,size[1]/height
         for face in faces:
-            result.append(FacialAreaRegion(x=int(face[0]/sx),y=int(face[1]/sy),w=int(face[2]/sx),h=int(face[3]/sy),
-                left_eye=(int(face[6]/sx),int(face[7]/sy)),right_eye=(int(face[4]/sx),int(face[5]/sy)),confidence=float(face[-1])))
+            point=lambda i:(int(face[i]/sx),int(face[i+1]/sy))
+            result.append(CameraFace(x=int(face[0]/sx),y=int(face[1]/sy),w=int(face[2]/sx),h=int(face[3]/sy),
+                right_eye=point(4),left_eye=point(6),nose_tip=point(8),right_mouth=point(10),left_mouth=point(12),confidence=float(face[-1])))
         return result
 
 

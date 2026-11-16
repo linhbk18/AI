@@ -116,12 +116,12 @@ class AttendanceAPI(unittest.TestCase):
     def test_camera_context_rechecked_after_inference_and_never_marks_attendance(self):
         sid=self.begin().json['id'];camera=self.post('/api/camera/sessions',dict(attendance_session_id=sid)).json['session_id']
         seen={}
-        def infer(image,cancelled,profile,allowed_student_ids):
+        def infer(image,cancelled,profile='retinaface_reuse',allowed_student_ids=None,class_id=None):
             seen['ids']=allowed_student_ids;self.service.finish(sid)
             return dict(faces=[],frame=dict(width=320,height=180))
         self.engine.analyze=infer
         from tests.test_camera_api import jpeg
-        r=self.client.post('/api/recognize',data=jpeg(),headers=dict(self.headers,**{'X-Camera-Session':camera}),content_type='image/jpeg')
+        r=self.client.post('/api/recognize',data=jpeg(),headers=dict(self.headers,**{'X-Camera-Session':camera,'X-Class-Id':str(self.c['id'])}),content_type='image/jpeg')
         self.assertEqual(r.status_code,409);self.assertEqual(set(seen['ids']),{s['id'] for s in self.s[:2]})
         self.assertEqual(self.service.detail(sid)['stats']['present'],0)
 
@@ -141,12 +141,12 @@ class ClassGallery(unittest.TestCase):
             engine.pipeline=Pipeline()
             import numpy as np
             frame=np.zeros((100,100,3),dtype=np.uint8)
-            one=engine.analyze(frame,allowed_student_ids=[rows[0]['student_id']])['faces'][0]
-            self.assertIsNotNone(one['top2']['candidate']);self.assertNotEqual(one['top1']['candidate'],one['top2']['candidate']);self.assertTrue(one['eligible_for_confirmation']);self.assertFalse(one['identity_confirmed'])
-            outside=engine.analyze(frame,allowed_student_ids=[rows[1]['student_id']])['faces'][0]
-            self.assertTrue(outside['outside_class']);self.assertFalse(outside['eligible_for_confirmation'])
-            empty=engine.analyze(frame,allowed_student_ids=[])['faces'][0]
-            self.assertEqual(empty['top1'],one['top1']);self.assertTrue(empty['outside_class']);self.assertFalse(empty['eligible_for_confirmation'])
+            one=engine.analyze(frame,allowed_student_ids=[rows[0]['student_id']],class_id=1)['faces'][0]
+            self.assertIsNone(one['top2']['candidate']);self.assertTrue(one['eligible_for_confirmation']);self.assertFalse(one['identity_confirmed'])
+            outside=engine.analyze(frame,allowed_student_ids=[rows[1]['student_id']],class_id=2)['faces'][0]
+            self.assertTrue(outside['unknown']);self.assertFalse(outside['eligible_for_confirmation']);self.assertIsNone(outside['top1']['student'])
+            empty=engine.analyze(frame,allowed_student_ids=[],class_id=3)['faces'][0]
+            self.assertTrue(empty['unknown']);self.assertFalse(empty['eligible_for_confirmation']);self.assertIsNone(empty['top1']['candidate'])
 
 
 if __name__=='__main__':unittest.main()

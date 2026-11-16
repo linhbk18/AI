@@ -1,27 +1,34 @@
 """Additive management routes; existing camera contracts remain in app.py."""
-from io import BytesIO
-import hashlib
-import warnings
+import base64
+import binascii
+import time
+import secrets
+import threading
 
 from flask import Blueprint, current_app, jsonify, render_template, request
-from PIL import Image, ImageOps, UnidentifiedImageError
 import numpy as np
 
 from .database.db import DomainError
+from .face_recognition.enrollment_quality import (MIN_CONFIDENCE,MIN_FACE_FRACTION,MIN_FACE_PIXELS,MAX_FACE_FRACTION,
+    MIN_LAPLACIAN_VARIANCE,MIN_BRIGHTNESS,MAX_BRIGHTNESS)
 from .face_recognition.runtime_service import EngineBusy, EngineUnavailable
+
+ENROLLMENT_POSTURES=('thẳng','quay_trái','quay_phải','ngẩng_nhẹ','cúi_nhẹ')
+SAMPLES_PER_POSTURE=6
+MIN_SAMPLE_INTERVAL_SECONDS=.4
+POSE_TIMEOUT_SECONDS=20
+SAME_POSE_COSINE_LIMIT=.97
+CROSS_IDENTITY_WARNING_COSINE=.50
 
 
 def management_blueprint(store,engine,token):
     bp=Blueprint('management',__name__)
+    enrollments={};enrollment_lock=threading.RLock()
+    postures=ENROLLMENT_POSTURES
 
     @bp.errorhandler(DomainError)
     def domain_error(exc):
         return jsonify(error=dict(code='MANAGEMENT_ERROR',message=str(exc))),exc.status
-
-    @bp.before_request
-    def upload_limit():
-        if request.path.endswith('/faces') and request.method=='POST':
-            request.max_content_length=5*1024*1024
 
     @bp.get('/overview')
     @bp.get('/classes')
@@ -36,6 +43,14 @@ def management_blueprint(store,engine,token):
 
     @bp.get('/api/legacy-gallery')
     def legacy(): return jsonify(items=store.legacy_options())
+
+    @bp.post('/api/students/check-code')
+    def check_student_code():
+        data=request.get_json(silent=True)
+        if not isinstance(data,dict):raise DomainError('Nội dung không hợp lệ.')
+        code=data.get('student_code')
+        if not isinstance(code,str) or not code.strip():raise DomainError('Hãy nhập mã sinh viên hợp lệ.')
+        return jsonify(exists=store.student_code_exists(code.strip()))
 
     def refresh():
         return bool(hasattr(engine,'refresh_gallery') and engine.refresh_gallery())
@@ -75,43 +90,157 @@ def management_blueprint(store,engine,token):
         store.map_legacy(student_id,data.get('dataset_label'),data.get('confirmed'))
         return jsonify(mapped=True,gallery_updated=refresh()),201
 
-    @bp.post('/api/students/<int:student_id>/faces')
-    def register_face(student_id):
-        store.detail('students',student_id)
-        if request.form.get('confirmed')!='true':
-            raise DomainError('Hãy xác nhận ảnh thuộc đúng sinh viên đã chọn. AI không tự xác minh điều này.')
-        upload=request.files.get('image')
-        if upload is None: raise DomainError('Chưa có ảnh tải lên.')
-        raw=upload.read(4*1024*1024+1)
-        if not raw or len(raw)>4*1024*1024: raise DomainError('Ảnh phải lớn hơn 0 và không quá 4 MB.',413)
+    @bp.post('/api/enrollment/start')
+    def enrollment_start():
+        if getattr(engine,'state','ready')!='ready':raise DomainError('Mô hình AI chưa sẵn sàng. Vui lòng thử lại sau.',503)
+        with enrollment_lock:
+            cutoff=time.monotonic()-900
+            for key,value in list(enrollments.items()):
+                if value['created']<cutoff:enrollments.pop(key,None)
+            session=secrets.token_urlsafe(24)
+            enrollments[session]=dict(created=time.monotonic(),index=0,counts=[0]*len(postures),vectors=[[] for _ in postures],last_sample=0.,pose_started=time.monotonic(),complete=False,similarity_checked=False,warnings=[],embedding_ms=0.)
+        return jsonify(session=session,postures=list(postures),samples_per_posture=SAMPLES_PER_POSTURE,
+            thresholds=dict(confidence=MIN_CONFIDENCE,min_face_fraction=MIN_FACE_FRACTION,min_face_px=MIN_FACE_PIXELS,
+                max_face_fraction=MAX_FACE_FRACTION,laplacian_variance=MIN_LAPLACIAN_VARIANCE,brightness=[MIN_BRIGHTNESS,MAX_BRIGHTNESS],
+                min_sample_interval_seconds=MIN_SAMPLE_INTERVAL_SECONDS,same_pose_cosine_max=SAME_POSE_COSINE_LIMIT,pose_timeout_seconds=POSE_TIMEOUT_SECONDS)),201
+
+    @bp.post('/api/enrollment/restart')
+    def enrollment_restart():
+        data=request.get_json(silent=True);session=data.get('session') if isinstance(data,dict) else None
+        with enrollment_lock:
+            state=enrollments.get(session)
+            if not state:raise DomainError('Phiên đăng ký đã hết hạn.',410)
+            state.update(index=0,counts=[0]*len(postures),vectors=[[] for _ in postures],last_sample=0.,pose_started=time.monotonic(),complete=False,similarity_checked=False,warnings=[],embedding_ms=0.)
+        return jsonify(reset=True,counts=[0]*len(postures))
+
+    @bp.post('/api/enrollment/cancel')
+    def enrollment_cancel():
+        data=request.get_json(silent=True);session=data.get('session') if isinstance(data,dict) else None
+        with enrollment_lock:enrollments.pop(session,None)
+        return jsonify(cancelled=True)
+
+    @bp.post('/api/enrollment/frame')
+    def enrollment_frame():
+        data=request.get_json(silent=True)
+        if not isinstance(data,dict):raise DomainError('Khung hình không hợp lệ.')
+        session=data.get('session');encoded=data.get('frame','')
+        with enrollment_lock:
+            state=enrollments.get(session)
+            if not state:raise DomainError('Phiên đăng ký đã hết hạn. Hãy bắt đầu lại.',410)
+            if state['complete']:return jsonify(complete=True,counts=state['counts'])
+            index=state['index'];posture=postures[index]
+            if time.monotonic()-state['pose_started']>POSE_TIMEOUT_SECONDS:
+                state['vectors'][index]=[];state['counts'][index]=0;state['pose_started']=time.monotonic()
+                return jsonify(timeout=True,posture=posture,counts=state['counts'],reason='Hết thời gian cho tư thế này. Hãy nhấn Thử lại tư thế.')
+            if time.monotonic()-state['last_sample']<MIN_SAMPLE_INTERVAL_SECONDS:return jsonify(skipped=True,posture=posture,counts=state['counts'])
+        if not isinstance(encoded,str) or len(encoded)>1_500_000:raise DomainError('Khung hình vượt giới hạn cho phép.',413)
+        if encoded.startswith('data:'):encoded=encoded.partition(',')[2]
         try:
-            with warnings.catch_warnings():
-                warnings.simplefilter('error',Image.DecompressionBombWarning)
-                with Image.open(BytesIO(raw)) as image:
-                    if image.format not in ('JPEG','PNG','WEBP') or getattr(image,'n_frames',1)!=1:
-                        raise DomainError('Chỉ nhận ảnh tĩnh JPEG, PNG hoặc WebP.',415)
-                    if max(image.size)>4096 or min(image.size)<32:
-                        raise DomainError('Kích thước ảnh phải từ 32 đến 4096 pixel mỗi cạnh.',422)
-                    rgb=np.asarray(ImageOps.exif_transpose(image).convert('RGB'))
-            bgr=np.ascontiguousarray(rgb[:,:,::-1])
-        except (UnidentifiedImageError,OSError,ValueError,Image.DecompressionBombError,Image.DecompressionBombWarning) as exc:
-            raise DomainError('Ảnh không đọc được hoặc vượt giới hạn an toàn.',422) from exc
-        try:
-            vector,pipeline=engine.enroll(bgr)
-        except EngineBusy:
-            raise DomainError('AI đang xử lý camera hoặc ảnh khác. Tắt camera rồi thử lại.',429)
-        except EngineUnavailable:
-            raise DomainError('Mô hình đang tải hoặc chưa sẵn sàng. Vui lòng thử lại sau.',503)
-        except ValueError as exc:
-            if str(exc)=='NO_FACE': raise DomainError('Không phát hiện khuôn mặt. Hãy chọn ảnh rõ mặt.',422) from exc
-            if str(exc)=='MULTIPLE_FACES': raise DomainError('Ảnh có nhiều khuôn mặt. Chỉ chọn ảnh một sinh viên.',422) from exc
-            current_app.logger.exception('Enrollment AI error; uploaded image not saved')
-            raise DomainError('AI không tạo được embedding hợp lệ. Kiểm tra Terminal; dữ liệu chưa được lưu.',422) from exc
+            raw=base64.b64decode(encoded,validate=True)
+            import cv2
+            frame=cv2.imdecode(np.frombuffer(raw,dtype=np.uint8),cv2.IMREAD_COLOR)
+        except (binascii.Error,ValueError):frame=None
+        if frame is None or frame.size==0:raise DomainError('Không đọc được khung hình từ camera.',422)
+        if max(frame.shape[:2])>960:raise DomainError('Khung hình camera quá lớn.',422)
+        try:result=engine.enrollment_frame(frame,posture)
+        except EngineBusy:return jsonify(busy=True,posture=posture,reason='AI đang xử lý, vui lòng giữ nguyên tư thế.')
+        except EngineUnavailable:raise DomainError('Mô hình AI chưa sẵn sàng.',503)
         except Exception as exc:
-            current_app.logger.exception('Enrollment failed; uploaded image not saved')
-            raise DomainError('Lỗi xử lý AI. Kiểm tra Terminal và thử lại; dữ liệu chưa được lưu.',500) from exc
-        identity=store.add_embedding(student_id,vector,pipeline,hashlib.sha256(raw).hexdigest())
-        return jsonify(id=identity,saved=True,gallery_updated=refresh(),
-            message='Đã lưu embedding theo hồ sơ được xác nhận thủ công. Ảnh không được lưu; đây không phải xác minh danh tính tự động.'),201
+            current_app.logger.exception('Camera enrollment inference failed')
+            raise DomainError('Lỗi xử lý khuôn mặt. Dữ liệu chưa được lưu.',500) from exc
+        with enrollment_lock:
+            state=enrollments.get(session)
+            if not state:raise DomainError('Phiên đăng ký đã hết hạn.',410)
+            if not result.get('accepted'):
+                return jsonify(accepted=False,posture=posture,counts=state['counts'],reason=result.get('reason','Điều chỉnh tư thế.'),
+                    face_count=result.get('face_count',0),quality=dict(sharpness=result.get('sharpness'),brightness=result.get('brightness')))
+            vectors=state['vectors'][index]
+            vector=np.asarray(result['embedding'],dtype=np.float64)
+            if any(float(np.dot(vector,np.asarray(previous)))>=SAME_POSE_COSINE_LIMIT for previous in vectors):
+                return jsonify(accepted=False,posture=posture,counts=state['counts'],reason='Mẫu quá giống mẫu vừa thu. Hãy dịch chuyển nhẹ đầu rồi giữ yên.')
+            vectors.append(result['embedding']);state['counts'][index]=len(vectors);state['last_sample']=time.monotonic()
+            if len(vectors)>=SAMPLES_PER_POSTURE:
+                state['index']+=1
+                if state['index']>=len(postures):state['complete']=True
+                else:state['pose_started']=time.monotonic()
+            state['embedding_ms']+=float(result.get('embedding_ms',0.))
+            return jsonify(accepted=True,posture=posture,counts=state['counts'],complete=state['complete'],
+                next_posture=None if state['complete'] else postures[state['index']],embedding_ms=result.get('embedding_ms'))
+
+    @bp.post('/api/enrollment/retry')
+    def enrollment_retry():
+        data=request.get_json(silent=True);session=data.get('session') if isinstance(data,dict) else None
+        with enrollment_lock:
+            state=enrollments.get(session)
+            if not state:raise DomainError('Phiên đăng ký đã hết hạn.',410)
+            index=state['index'];state['vectors'][index]=[];state['counts'][index]=0;state['pose_started']=time.monotonic()
+        return jsonify(posture=postures[index],counts=state['counts'])
+
+    @bp.post('/api/enrollment/duplicate-check')
+    def enrollment_duplicate_check():
+        data=request.get_json(silent=True)
+        if not isinstance(data,dict) or not isinstance(data.get('session'),str):raise DomainError('Phiên đăng ký không hợp lệ.')
+        with enrollment_lock:
+            state=enrollments.get(data['session'])
+            if not state or not state['complete']:raise DomainError('Hãy thu thập đủ năm tư thế trước.')
+            samples=[np.asarray(v,dtype=np.float64) for group in state['vectors'] for v in group]
+        records,_=store.gallery_snapshot();matches={}
+        own_id=data.get('student_id')
+        own_label=None
+        if own_id is not None:
+            if isinstance(own_id,str) and own_id.isdigit():own_id=int(own_id)
+            own=store.detail('students',own_id);own_label=own['student_code']+' · '+own['full_name']
+        for record in records:
+            if own_label and record.get('student_id')==own_label:continue
+            existing=np.asarray(record.get('embedding',[]),dtype=np.float64)
+            if existing.shape!=(512,):continue
+            score=max(float(np.dot(v,existing)/(max(np.linalg.norm(v)*np.linalg.norm(existing),1e-12))) for v in samples)
+            if score>=CROSS_IDENTITY_WARNING_COSINE:matches[record['student_id']]=max(score,matches.get(record['student_id'],0))
+        warnings_found=[dict(student=student,similarity=round(score,4)) for student,score in sorted(matches.items(),key=lambda pair:-pair[1])]
+        with enrollment_lock:
+            state=enrollments.get(data['session'])
+            if state:state['similarity_checked']=True;state['warnings']=warnings_found
+        return jsonify(warnings=warnings_found,threshold=CROSS_IDENTITY_WARNING_COSINE,requires_operator_identity_confirmation=True)
+
+    @bp.post('/api/enrollment/finish')
+    def enrollment_finish():
+        data=request.get_json(silent=True)
+        if not isinstance(data,dict):raise DomainError('Thông tin đăng ký không hợp lệ.')
+        if data.get('identity_confirmed') is not True:raise DomainError('Người vận hành cần xác nhận danh tính sinh viên trước khi lưu.')
+        session=data.get('session')
+        with enrollment_lock:
+            state=enrollments.get(session)
+            if not state or not state['complete']:raise DomainError('Chưa thu thập đủ dữ liệu năm tư thế.')
+            if not state['similarity_checked']:raise DomainError('Hãy kiểm tra cảnh báo similarity trước khi lưu.')
+            if state['warnings'] and data.get('gallery_warning_acknowledged') is not True:raise DomainError('Hãy xác nhận đã xem cảnh báo similarity.')
+            samples=[dict(posture=posture,embedding=v,pipeline=dict(embedding_ms=state['embedding_ms']/max(1,sum(state['counts'])),sample_interval_seconds=MIN_SAMPLE_INTERVAL_SECONDS)) for posture,group in zip(postures,state['vectors']) for v in group]
+            enrollment_started=state['created']
+        if getattr(engine,'state','ready')!='ready':raise DomainError('Recognition Service chưa sẵn sàng; chưa lưu dữ liệu.',503)
+        student_id=data.get('student_id')
+        if isinstance(student_id,str) and student_id.isdigit():student_id=int(student_id)
+        code=data.get('student_code');name=data.get('full_name');class_id=data.get('class_id')
+        if isinstance(class_id,str) and class_id.isdigit():class_id=int(class_id)
+        started=time.perf_counter()
+        old_rows=None
+        if student_id is None:student_id=store.create_student_with_embeddings(dict(student_code=code,full_name=name),class_id,samples)
+        else:
+            student=store.detail('students',student_id)
+            if student['student_code']!=code or student['full_name']!=name:raise DomainError('Thông tin sinh viên đã thay đổi. Tải lại hồ sơ trước khi đăng ký lại.',409)
+            old_rows=store.replace_student_embeddings(student_id,samples)
+        try:
+            gallery_published=refresh() and getattr(engine,'_gallery_revision',store.gallery_revision())==store.gallery_revision()
+        except Exception:
+            current_app.logger.exception('Gallery refresh failed after enrollment commit')
+            gallery_published=False
+        if not gallery_published:
+            if old_rows is None:store.rollback_created_student(student_id,class_id)
+            else:store.restore_student_embeddings(student_id,old_rows)
+            try:refresh()
+            except Exception:current_app.logger.exception('Gallery refresh failed after enrollment rollback')
+            raise DomainError('Không cập nhật được gallery runtime. Đã hoàn tác hồ sơ và embedding.',503)
+        with enrollment_lock:enrollments.pop(session,None)
+        return jsonify(saved=True,student_id=student_id,gallery_updated=True,gallery_revision=store.gallery_revision(),
+            registration_ms=(time.monotonic()-enrollment_started)*1000,persistence_ms=(time.perf_counter()-started)*1000,embedding_ms=sum(x['pipeline']['embedding_ms'] for x in samples),embedding_count=len(samples),
+            message='Đã lưu hồ sơ và cập nhật gallery. Ảnh camera không được lưu.'),201
 
     return bp

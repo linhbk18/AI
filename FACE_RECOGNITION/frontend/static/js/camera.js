@@ -39,7 +39,7 @@
     message("Đang mở camera và khởi tạo phiên xử lý…");
     try{
       startController=new AbortController();const controller=startController;const timer=setTimeout(()=>controller.abort(),10000);
-      const options={profile:profile.value};if(window.attendanceBridge)options.attendance_session_id=window.attendanceBridge.getSessionId();
+      const options={profile:profile.value};if(window.attendanceBridge){options.attendance_session_id=window.attendanceBridge.getSessionId();options.class_id=window.attendanceBridge.getClassId();}
       let response;try{response=await fetch("/api/camera/sessions",{method:"POST",headers:{...token(),"Content-Type":"application/json"},body:JSON.stringify(options),signal:controller.signal});}finally{clearTimeout(timer);startController=null;}
       const data=await response.json();if(!response.ok)throw new Error(data.error?.message||"Không tạo được phiên camera.");
       if(epoch!==generation){await closeSession(data.session_id);return;}session=data.session_id;
@@ -72,7 +72,8 @@
   async function requestFrame(endpoint,captured,controller,timeoutMs){
     const timer=setTimeout(()=>controller.abort(),timeoutMs),began=performance.now();
     try{
-      const response=await fetch(endpoint,{method:"POST",body:captured.blob,headers:{...token(),"Content-Type":"image/jpeg","X-Camera-Session":session,"X-Client-Captured-Ms":String(captured.began)},signal:controller.signal});
+      const headers={...token(),"Content-Type":"image/jpeg","X-Camera-Session":session,"X-Client-Captured-Ms":String(captured.began)};const classId=window.attendanceBridge?.getClassId?.();if(classId)headers["X-Class-Id"]=String(classId);
+      const response=await fetch(endpoint,{method:"POST",body:captured.blob,headers,signal:controller.signal});
       let data;try{data=await response.json();}catch{throw new Error('Backend trả phản hồi không hợp lệ. Kiểm tra Terminal và thử lại.');}if(!response.ok){const error=new Error(data.error?.message||"Backend xử lý thất bại.");error.status=response.status;throw error;}
       if(!Array.isArray(data.faces)||data.frame?.width!==captured.canvas.width||data.frame?.height!==captured.canvas.height)throw new Error("Kết quả backend không khớp khung hình.");
       const http_ms=performance.now()-began,stages={};
@@ -107,8 +108,8 @@
   }
   function boxes(ctx,faces,scale,ox=0,oy=0,names=false,width=10000){
     ctx.font="12px Segoe UI";ctx.lineWidth=2;
-    for(const face of faces){const b=face.box;ctx.strokeStyle=getComputedStyle(document.documentElement).getPropertyValue(names?"--warning":"--primary").trim();ctx.strokeRect(ox+b.x*scale,oy+b.y*scale,b.w*scale,b.h*scale);
-      const label=names?(face.identity_confirmed?(face.outside_class?"Không thuộc lớp":face.top1.student?.full_name||"Không xác định"):"Không xác định"):"#"+face.face_id+" · khuôn mặt";
+    for(const face of faces){const b=face.box,unknown=face.unknown===true||face.scope_match===false;ctx.strokeStyle=getComputedStyle(document.documentElement).getPropertyValue(unknown?"--warning":names?"--success":"--primary").trim();ctx.strokeRect(ox+b.x*scale,oy+b.y*scale,b.w*scale,b.h*scale);
+      const label=names?(unknown?"Không xác định":face.top1.student?.full_name||"Ứng viên chưa xác nhận"):"#"+face.face_id+" · khuôn mặt";
       const tw=Math.min(width,ctx.measureText(label).width+10),x=Math.max(0,Math.min(width-tw,ox+b.x*scale)),y=Math.max(0,oy+b.y*scale-23);
       ctx.fillStyle=getComputedStyle(document.documentElement).getPropertyValue("--navy").trim();ctx.fillRect(x,y,tw,21);ctx.fillStyle=getComputedStyle(document.documentElement).getPropertyValue("--white").trim();ctx.fillText(label,x+5,y+15,tw-8);
     }
@@ -224,7 +225,7 @@
     ctx.font='600 12px Segoe UI';ctx.lineWidth=2;
     for(const t of items){
       const rect=window.SafeFaceTracks.project(t.box,video.videoWidth,video.videoHeight,width,height,mirror),{x:left,y:top,w,h}=rect;
-      ctx.strokeStyle=theme.getPropertyValue('--primary').trim();ctx.strokeRect(left,top,w,h);
+      ctx.strokeStyle=theme.getPropertyValue(t.unknown&&!t.stale?'--warning':'--success').trim();ctx.strokeRect(left,top,w,h);
       const f=t.candidate,p=f?.top1?.student,confirmed=p&&attendanceState.sessionId===window.attendanceBridge?.getSessionId()&&attendanceState.records.some(r=>r.student_id===p.id&&r.attendance_status==='PRESENT');
       const lines=t.unknown&&!t.stale?['Không xác định']:window.RecognitionDisplay.describe(f,t.stale,confirmed).lines;
       t.displayLines=lines;t.displayBox=rect;
