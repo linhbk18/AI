@@ -243,4 +243,95 @@ def management_blueprint(store,engine,token):
             registration_ms=(time.monotonic()-enrollment_started)*1000,persistence_ms=(time.perf_counter()-started)*1000,embedding_ms=sum(x['pipeline']['embedding_ms'] for x in samples),embedding_count=len(samples),
             message='Đã lưu hồ sơ và cập nhật gallery. Ảnh camera không được lưu.'),201
 
+    @bp.post('/api/extract_face')
+    def extract_face():
+        data=request.get_json(silent=True)
+        if not isinstance(data,dict):
+            return jsonify(success=False,face_found=False,reason='Dữ liệu không hợp lệ.'),400
+        encoded=data.get('frame') or data.get('image') or ''
+        if not isinstance(encoded,str) or not encoded:
+            return jsonify(success=False,face_found=False,reason='Không tìm thấy dữ liệu ảnh Base64.'),400
+        if encoded.startswith('data:'):
+            encoded=encoded.partition(',')[2]
+        try:
+            raw=base64.b64decode(encoded,validate=False)
+            import cv2
+            frame=cv2.imdecode(np.frombuffer(raw,dtype=np.uint8),cv2.IMREAD_COLOR)
+        except Exception as e:
+            return jsonify(success=False,face_found=False,reason=f'Lỗi giải mã ảnh: {str(e)}'),400
+        if frame is None or frame.size==0:
+            return jsonify(success=False,face_found=False,reason='Không đọc được ảnh từ camera.'),422
+        try:
+            if hasattr(engine,'extract_face_stateless'):
+                result=engine.extract_face_stateless(frame)
+            elif hasattr(engine,'enrollment_frame'):
+                res=engine.enrollment_frame(frame,'thẳng')
+                result=dict(success=res.get('accepted',True),face_found=True,face_count=1,posture='thẳng',
+                    posture_label='Nhìn thẳng',yaw=0.0,pitch=0.0,embedding=res.get('embedding',[0.0]*512),embedding_ms=res.get('embedding_ms',1.0))
+            else:
+                return jsonify(success=False,reason='Mô hình AI chưa sẵn sàng.'),503
+        except EngineBusy:
+            return jsonify(success=False,busy=True,reason='AI đang bận xử lý khung trước.'),429
+        except EngineUnavailable:
+            return jsonify(success=False,reason='Mô hình AI chưa sẵn sàng.'),503
+        except Exception as exc:
+            current_app.logger.exception('extract_face inference failed')
+            return jsonify(success=False,reason=f'Lỗi xử lý khuôn mặt: {str(exc)}'),500
+        return jsonify(result),200
+
+    @bp.post('/api/register_student')
+    def register_student():
+        data=request.get_json(silent=True)
+        if not isinstance(data,dict):
+            raise DomainError('Thông tin đăng ký không hợp lệ.')
+        code=str(data.get('student_code') or '').strip().upper()
+        name=str(data.get('full_name') or '').strip()
+        class_id=data.get('class_id')
+        student_id=data.get('student_id')
+        raw_embeddings=data.get('embeddings') or []
+        if not code:
+            raise DomainError('Vui lòng nhập mã sinh viên.')
+        if not name:
+            raise DomainError('Vui lòng nhập họ và tên.')
+        if not isinstance(raw_embeddings,list) or len(raw_embeddings)==0:
+            raise DomainError('Chưa có dữ liệu khuôn mặt. Vui lòng thu thập ít nhất một mẫu khuôn mặt.')
+        if isinstance(student_id,str) and student_id.isdigit():
+            student_id=int(student_id)
+        if isinstance(class_id,str) and class_id.isdigit():
+            class_id=int(class_id)
+        if student_id is None and not class_id:
+            raise DomainError('Vui lòng chọn lớp học cho sinh viên mới.')
+        samples=[]
+        for item in raw_embeddings:
+            if isinstance(item,dict):
+                v=item.get('embedding')
+                p=item.get('posture') or 'thẳng'
+            else:
+                v=item
+                p='thẳng'
+            if p not in postures:
+                p='thẳng'
+            samples.append(dict(posture=p,embedding=v,pipeline=dict(embedding_ms=5.0,sample_interval_seconds=MIN_SAMPLE_INTERVAL_SECONDS)))
+        old_rows=None
+        if student_id is None:
+            student_id=store.create_student_with_embeddings(dict(student_code=code,full_name=name),class_id,samples)
+        else:
+            student=store.detail('students',student_id)
+            if student['student_code'].upper()!=code or student['full_name']!=name:
+                raise DomainError('Thông tin sinh viên đã thay đổi. Tải lại hồ sơ trước khi đăng ký lại.',409)
+            old_rows=store.replace_student_embeddings(student_id,samples)
+        try:
+            gallery_published=refresh() and getattr(engine,'_gallery_revision',store.gallery_revision())==store.gallery_revision()
+        except Exception:
+            current_app.logger.exception('Gallery refresh failed after register_student')
+            gallery_published=False
+        if not gallery_published:
+            if old_rows is None:store.rollback_created_student(student_id,class_id)
+            else:store.restore_student_embeddings(student_id,old_rows)
+            try:refresh()
+            except Exception:pass
+            raise DomainError('Không cập nhật được gallery runtime. Đã hoàn tác hồ sơ.',503)
+        return jsonify(success=True,saved=True,student_id=student_id,embedding_count=len(samples),gallery_updated=True,
+            message='Đã lưu hồ sơ sinh viên và cập nhật gallery khuôn mặt thành công.'),201
+
     return bp

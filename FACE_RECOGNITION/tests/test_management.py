@@ -213,5 +213,33 @@ with app.test_client() as c:
             with self.assertRaises(DomainError):
                 store.add_embedding(s['id'],vector,{},'bad')
 
+    def test_stateless_extract_face_and_register_student(self):
+        c=self.classroom('LOP-STATELESS')
+        frame=base64.b64encode(jpeg()).decode('ascii')
+        # Test extract_face
+        res=self.post('/api/extract_face',dict(frame=frame))
+        self.assertEqual(res.status_code,200,res.json)
+        self.assertTrue(res.json.get('success'))
+        self.assertIn('embedding',res.json)
+        self.assertIn('posture',res.json)
+        emb=res.json['embedding']
+
+        # Test register_student
+        samples=[dict(posture='thẳng',embedding=emb) for _ in range(5)]
+        reg=self.post('/api/register_student',dict(
+            student_code='SV-STATELESS',
+            full_name='Stateless Student',
+            class_id=c['id'],
+            embeddings=samples
+        ))
+        self.assertEqual(reg.status_code,201,reg.json)
+        self.assertTrue(reg.json.get('saved'))
+        self.assertGreater(reg.json.get('student_id'),0)
+
+        # Verify student exists in overview
+        detail=self.client.get(f"/api/students/{reg.json['student_id']}").json
+        self.assertEqual(detail['student_code'],'SV-STATELESS')
+        self.assertEqual(detail['face_count'],5)
+
 
 if __name__=='__main__':unittest.main()

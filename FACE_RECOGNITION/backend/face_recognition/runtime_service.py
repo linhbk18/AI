@@ -13,7 +13,7 @@ import numpy as np
 
 from .face_service import FaceMatcher
 from .camera_pipeline import CameraPipeline, YuNetDetector, PROFILES
-from .enrollment_quality import face_box_feedback,frame_quality_feedback,estimate_head_pose,posture_matches
+from .enrollment_quality import face_box_feedback,frame_quality_feedback,estimate_head_pose,posture_matches,classify_posture
 
 ROOT = Path(__file__).resolve().parents[2]
 OUTPUTS = ROOT / 'outputs'
@@ -174,6 +174,52 @@ class RecognitionEngine:
             vector=(vector/norm).tolist()
             return dict(accepted=True,embedding=vector,face_count=1,yaw=yaw,pitch=pitch,sharpness=sharpness,
                 brightness=brightness,embedding_ms=embedding_ms,processing_ms=(time.perf_counter()-started)*1000)
+        finally:self._guard.release()
+
+    def extract_face_stateless(self,bgr):
+        """Stateless extraction: detects face, estimates pose (yaw, pitch, posture), and extracts normalized ArcFace embedding."""
+        if self.state!='ready':raise EngineUnavailable()
+        if not self._guard.acquire(blocking=False):raise EngineBusy()
+        try:
+            import cv2
+            started=time.perf_counter()
+            height,width=bgr.shape[:2]
+            faces=self.pipeline.yunet.detect_faces(bgr,dimension=640,score_threshold=.6)
+            if not faces:return dict(success=False,face_found=False,reason='Không phát hiện khuôn mặt. Hãy nhìn vào camera.')
+            if len(faces)!=1:return dict(success=False,face_found=True,face_count=len(faces),reason='Đảm bảo chỉ có một khuôn mặt trong khung.')
+            face=faces[0];x,y,w,h=face.x,face.y,face.w,face.h
+            box_feedback=face_box_feedback(width,height,x,y,w,h,face.confidence)
+            if box_feedback:return dict(success=False,face_found=True,face_count=1,reason=box_feedback)
+            crop=bgr[max(0,y):min(height,y+h),max(0,x):min(width,x+w)]
+            if crop.size==0:return dict(success=False,face_found=True,face_count=1,reason='Khuôn mặt nằm ngoài khung hình.')
+            gray=cv2.cvtColor(crop,cv2.COLOR_BGR2GRAY)
+            sharpness=float(cv2.Laplacian(gray,cv2.CV_64F).var())
+            brightness=float(gray.mean())
+            quality_feedback=frame_quality_feedback(sharpness,brightness)
+            if quality_feedback:return dict(success=False,face_found=True,face_count=1,reason=quality_feedback,sharpness=sharpness,brightness=brightness)
+            yaw,pitch=estimate_head_pose(face.left_eye,face.right_eye,face.nose_tip,face.left_mouth,face.right_mouth)
+            posture=classify_posture(yaw,pitch)
+            try:
+                extracted=self.model.extract_faces(img_path=bgr,detector_backend=self.settings['detector_backend'],
+                    enforce_detection=True,align=self.settings['align'],expand_percentage=0,color_face='rgb',normalize_face=True,anti_spoofing=False)
+            except ValueError as exc:
+                if 'Face could not be detected' in str(exc):return dict(success=False,face_found=False,reason='Không căn chỉnh được khuôn mặt. Hãy nhìn rõ vào camera.')
+                raise
+            if len(extracted)!=1:return dict(success=False,face_found=True,face_count=len(extracted),reason='AI chưa căn chỉnh được đúng một khuôn mặt.')
+            from deepface.modules import preprocessing
+            image=extracted[0]['face'][:,:,::-1]
+            tensor=preprocessing.resize_image(image,target_size=(self.pipeline.model.input_shape[1],self.pipeline.model.input_shape[0]))
+            tensor=preprocessing.normalize_input(tensor,normalization=self.settings['normalization'])
+            embedding_started=time.perf_counter()
+            vector=np.asarray(self.pipeline.model.forward(tensor),dtype=np.float64).reshape(-1)
+            embedding_ms=(time.perf_counter()-embedding_started)*1000
+            norm=float(np.linalg.norm(vector))
+            if vector.shape!=(512,) or not np.isfinite(vector).all() or norm==0:raise ValueError('INVALID_EMBEDDING')
+            vector=(vector/norm).tolist()
+            posture_labels={'thẳng':'Nhìn thẳng','quay_trái':'Quay đầu sang trái','quay_phải':'Quay đầu sang phải','ngẩng_nhẹ':'Ngẩng nhẹ','cúi_nhẹ':'Cúi nhẹ'}
+            return dict(success=True,face_found=True,face_count=1,posture=posture,posture_label=posture_labels.get(posture),
+                yaw=round(float(yaw),2),pitch=round(float(pitch),2),sharpness=round(sharpness,1),brightness=round(brightness,1),
+                embedding=vector,embedding_ms=round(embedding_ms,2),processing_ms=round((time.perf_counter()-started)*1000,2))
         finally:self._guard.release()
 
     def start_loading(self):

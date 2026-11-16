@@ -45,3 +45,17 @@ def posture_matches(posture,yaw,pitch):
             'quay_phải':-45<=yaw<=-20 and abs(pitch)<=20,
             'ngẩng_nhẹ':12<=pitch<=30 and abs(yaw)<=20,
             'cúi_nhẹ':-30<=pitch<=-12 and abs(yaw)<=20}.get(posture,False)
+
+
+def classify_posture(yaw, pitch):
+    if abs(yaw) <= 15 and abs(pitch) <= 15:
+        return 'thẳng'
+    if 18 <= yaw <= 50 and abs(pitch) <= 25:
+        return 'quay_trái'
+    if -50 <= yaw <= -18 and abs(pitch) <= 25:
+        return 'quay_phải'
+    if 10 <= pitch <= 35 and abs(yaw) <= 25:
+        return 'ngẩng_nhẹ'
+    if -35 <= pitch <= -10 and abs(yaw) <= 25:
+        return 'cúi_nhẹ'
+    return None
